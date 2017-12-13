@@ -72,7 +72,7 @@ struct bgp_attr_encap_subtlv {
 	unsigned long refcnt;
 	uint16_t type;
 	uint16_t length;
-	uint8_t value[1]; /* will be extended */
+	uint8_t value[0]; /* will be extended */
 };
 
 #if ENABLE_BGP_VNC
@@ -207,7 +207,12 @@ struct transit {
 	u_char *val;
 };
 
-#define ATTR_FLAG_BIT(X)  (1ULL << ((X) - 1))
+/* "(void) 0" will generate a compiler error.  this is a safety check to
+ * ensure we're not using a value that exceeds the bit size of attr->flag. */
+#define ATTR_FLAG_BIT(X) \
+	__builtin_choose_expr((X) >= 1 && (X) <= 64, \
+			      1ULL << ((X) - 1), \
+			      (void) 0)
 
 #define BGP_CLUSTER_LIST_LENGTH(attr)                                          \
 	(((attr)->flag & ATTR_FLAG_BIT(BGP_ATTR_CLUSTER_LIST))                 \
@@ -222,6 +227,7 @@ typedef enum {
 	/* only used internally, send notify + convert to BGP_ATTR_PARSE_ERROR
 	   */
 	BGP_ATTR_PARSE_ERROR_NOTIFYPLS = -3,
+	BGP_ATTR_PARSE_EOR = -4,
 } bgp_attr_parse_ret_t;
 
 struct bpacket_attr_vec_arr;
@@ -233,10 +239,8 @@ extern bgp_attr_parse_ret_t bgp_attr_parse(struct peer *, struct attr *,
 					   bgp_size_t, struct bgp_nlri *,
 					   struct bgp_nlri *);
 extern void bgp_attr_dup(struct attr *, struct attr *);
-extern void bgp_attr_deep_dup(struct attr *, struct attr *);
-extern void bgp_attr_deep_free(struct attr *);
+extern void bgp_attr_undup(struct attr *new, struct attr *old);
 extern struct attr *bgp_attr_intern(struct attr *attr);
-extern struct attr *bgp_attr_refcount(struct attr *attr);
 extern void bgp_attr_unintern_sub(struct attr *);
 extern void bgp_attr_unintern(struct attr **);
 extern void bgp_attr_flush(struct attr *);

@@ -53,6 +53,7 @@
 /* Zebra instance */
 struct zebra_t zebrad = {
 	.rtm_table_default = 0,
+	.packets_to_process = ZEBRA_ZAPI_PACKETS_TO_PROCESS,
 };
 
 /* process id. */
@@ -125,16 +126,13 @@ static void sigint(void)
 
 	zlog_notice("Terminating on signal");
 
-#ifdef HAVE_IRDP
-	irdp_finish();
-#endif
+	frr_early_fini();
 
-	zebra_ptm_finish();
 	list_delete_all_node(zebrad.client_list);
+	zebra_ptm_finish();
 
 	if (retain_mode)
-		RB_FOREACH(vrf, vrf_name_head, &vrfs_by_name)
-		{
+		RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
 			zvrf = vrf->info;
 			if (zvrf)
 				SET_FLAG(zvrf->flags, ZEBRA_VRF_RETAIN);
@@ -147,17 +145,14 @@ static void sigint(void)
 	access_list_reset();
 	prefix_list_reset();
 	route_map_finish();
-	cmd_terminate();
-	vty_terminate();
-	zprivs_terminate(&zserv_privs);
-	list_delete(zebrad.client_list);
+
+	list_delete_and_null(&zebrad.client_list);
 	work_queue_free(zebrad.ribq);
 	if (zebrad.lsp_process_q)
 		work_queue_free(zebrad.lsp_process_q);
 	meta_queue_free(zebrad.mq);
-	thread_master_free(zebrad.master);
-	closezlog();
 
+	frr_fini();
 	exit(0);
 }
 
@@ -206,6 +201,9 @@ int main(int argc, char **argv)
 	char *lblmgr_path = NULL;
 	struct sockaddr_storage dummy;
 	socklen_t dummylen;
+#if defined(HANDLE_ZAPI_FUZZING)
+	char *fuzzing = NULL;
+#endif
 
 	frr_preinit(&zebra_di, argc, argv);
 
@@ -213,6 +211,9 @@ int main(int argc, char **argv)
 		"bakz:e:l:r"
 #ifdef HAVE_NETLINK
 		"s:"
+#endif
+#if defined(HANDLE_ZAPI_FUZZING)
+		"c:"
 #endif
 		,
 		longopts,
@@ -226,6 +227,9 @@ int main(int argc, char **argv)
 #ifdef HAVE_NETLINK
 		"  -s, --nl-bufsize   Set netlink receive buffer size\n"
 #endif /* HAVE_NETLINK */
+#if defined(HANDLE_ZAPI_FUZZING)
+		"  -c <file>          Bypass normal startup use this file for tetsting of zapi"
+#endif
 		);
 
 	while (1) {
@@ -276,6 +280,11 @@ int main(int argc, char **argv)
 			nl_rcvbufsize = atoi(optarg);
 			break;
 #endif /* HAVE_NETLINK */
+#if defined(HANDLE_ZAPI_FUZZING)
+		case 'c':
+			fuzzing = optarg;
+			break;
+#endif
 		default:
 			frr_help_exit(1);
 			break;
@@ -297,9 +306,6 @@ int main(int argc, char **argv)
 #if defined(HAVE_RTADV)
 	rtadv_cmd_init();
 #endif
-#ifdef HAVE_IRDP
-	irdp_init();
-#endif
 /* PTM socket */
 #ifdef ZEBRA_PTM_SUPPORT
 	zebra_ptm_init();
@@ -315,6 +321,13 @@ int main(int argc, char **argv)
 	/* Initialize NS( and implicitly the VRF module), and make kernel
 	 * routing socket. */
 	zebra_ns_init();
+
+#if defined(HANDLE_ZAPI_FUZZING)
+	if (fuzzing) {
+		zserv_read_file(fuzzing);
+		exit(0);
+	}
+#endif
 
 	/* Process the configuration file. Among other configuration
 	*  directives we can meet those installing static routes. Such

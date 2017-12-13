@@ -70,8 +70,7 @@ void zebra_vrf_update_all(struct zserv *client)
 {
 	struct vrf *vrf;
 
-	RB_FOREACH(vrf, vrf_id_head, &vrfs_by_id)
-	{
+	RB_FOREACH (vrf, vrf_id_head, &vrfs_by_id) {
 		if (vrf->vrf_id)
 			zsend_vrf_add(client, vrf_info_lookup(vrf->vrf_id));
 	}
@@ -180,7 +179,6 @@ static int zebra_vrf_delete(struct vrf *vrf)
 
 	/* uninstall everything */
 	if (!CHECK_FLAG(zvrf->flags, ZEBRA_VRF_RETAIN)) {
-		struct listnode *node;
 		struct interface *ifp;
 
 		for (afi = AFI_IP; afi <= AFI_IP6; afi++) {
@@ -205,7 +203,7 @@ static int zebra_vrf_delete(struct vrf *vrf)
 		zebra_mpls_close_tables(zvrf);
 		zebra_pw_exit(zvrf);
 
-		for (ALL_LIST_ELEMENTS_RO(vrf->iflist, node, ifp))
+		FOR_ALL_INTERFACES (vrf, ifp)
 			if_nbr_ipv6ll_to_ipv4ll_neigh_del_all(ifp);
 	}
 
@@ -290,8 +288,9 @@ static void zebra_rtable_node_cleanup(struct route_table *table,
 {
 	struct route_entry *re, *next;
 
-	RNODE_FOREACH_RE_SAFE(node, re, next)
-	rib_unlink(node, re);
+	RNODE_FOREACH_RE_SAFE (node, re, next) {
+		rib_unlink(node, re);
+	}
 
 	if (node->info)
 		XFREE(MTYPE_RIB_DEST, node->info);
@@ -467,10 +466,13 @@ static int vrf_config_write(struct vty *vty)
 	struct vrf *vrf;
 	struct zebra_vrf *zvrf;
 
-	RB_FOREACH(vrf, vrf_name_head, &vrfs_by_name)
-	{
+	RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
 		zvrf = vrf->info;
-		if (!zvrf || strcmp(zvrf_name(zvrf), VRF_DEFAULT_NAME)) {
+
+		if (!zvrf)
+			continue;
+
+		if (strcmp(zvrf_name(zvrf), VRF_DEFAULT_NAME)) {
 			vty_out(vty, "vrf %s\n", zvrf_name(zvrf));
 			vty_out(vty, "!\n");
 		}

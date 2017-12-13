@@ -23,6 +23,7 @@
 #include "command.h"
 #include "hash.h"
 #include "memory.h"
+#include "jhash.h"
 
 #include "bgpd/bgp_memory.h"
 #include "bgpd/bgp_community.h"
@@ -168,7 +169,6 @@ struct community *community_uniq_sort(struct community *com)
 		return NULL;
 
 	new = community_new();
-	;
 	new->json = NULL;
 
 	for (i = 0; i < com->size; i++) {
@@ -191,9 +191,10 @@ struct community *community_uniq_sort(struct community *com)
    0xFFFFFF01      "no-export"
    0xFFFFFF02      "no-advertise"
    0xFFFFFF03      "local-AS"
+   0xFFFF0000      "graceful-shutdown"
 
    For other values, "AS:VAL" format is used.  */
-static void set_community_string(struct community *com)
+static void set_community_string(struct community *com, bool make_json)
 {
 	int i;
 	char *str;
@@ -209,16 +210,20 @@ static void set_community_string(struct community *com)
 	if (!com)
 		return;
 
-	com->json = json_object_new_object();
-	json_community_list = json_object_new_array();
+	if (make_json) {
+		com->json = json_object_new_object();
+		json_community_list = json_object_new_array();
+	}
 
 	/* When communities attribute is empty.  */
 	if (com->size == 0) {
 		str = XMALLOC(MTYPE_COMMUNITY_STR, 1);
 		str[0] = '\0';
 
-		json_object_string_add(com->json, "string", "");
-		json_object_object_add(com->json, "list", json_community_list);
+		if (make_json) {
+			json_object_string_add(com->json, "string", "");
+			json_object_object_add(com->json, "list", json_community_list);
+		}
 		com->str = str;
 		return;
 	}
@@ -244,6 +249,9 @@ static void set_community_string(struct community *com)
 		case COMMUNITY_LOCAL_AS:
 			len += strlen(" local-AS");
 			break;
+		case COMMUNITY_GSHUT:
+			len += strlen(" graceful-shutdown");
+			break;
 		default:
 			len += strlen(" 65536:65535");
 			break;
@@ -268,41 +276,61 @@ static void set_community_string(struct community *com)
 		case COMMUNITY_INTERNET:
 			strcpy(pnt, "internet");
 			pnt += strlen("internet");
-			json_string = json_object_new_string("internet");
-			json_object_array_add(json_community_list, json_string);
+			if (make_json) {
+				json_string = json_object_new_string("internet");
+				json_object_array_add(json_community_list, json_string);
+			}
 			break;
 		case COMMUNITY_NO_EXPORT:
 			strcpy(pnt, "no-export");
 			pnt += strlen("no-export");
-			json_string = json_object_new_string("noExport");
-			json_object_array_add(json_community_list, json_string);
+			if (make_json) {
+				json_string = json_object_new_string("noExport");
+				json_object_array_add(json_community_list, json_string);
+			}
 			break;
 		case COMMUNITY_NO_ADVERTISE:
 			strcpy(pnt, "no-advertise");
 			pnt += strlen("no-advertise");
-			json_string = json_object_new_string("noAdvertise");
-			json_object_array_add(json_community_list, json_string);
+			if (make_json) {
+				json_string = json_object_new_string("noAdvertise");
+				json_object_array_add(json_community_list, json_string);
+			}
 			break;
 		case COMMUNITY_LOCAL_AS:
 			strcpy(pnt, "local-AS");
 			pnt += strlen("local-AS");
-			json_string = json_object_new_string("localAs");
-			json_object_array_add(json_community_list, json_string);
+			if (make_json) {
+				json_string = json_object_new_string("localAs");
+				json_object_array_add(json_community_list, json_string);
+			}
+			break;
+		case COMMUNITY_GSHUT:
+			strcpy(pnt, "graceful-shutdown");
+			pnt += strlen("graceful-shutdown");
+			if (make_json) {
+				json_string = json_object_new_string("gracefulShutdown");
+				json_object_array_add(json_community_list, json_string);
+			}
 			break;
 		default:
 			as = (comval >> 16) & 0xFFFF;
 			val = comval & 0xFFFF;
 			sprintf(pnt, "%u:%d", as, val);
-			json_string = json_object_new_string(pnt);
-			json_object_array_add(json_community_list, json_string);
+			if (make_json) {
+				json_string = json_object_new_string(pnt);
+				json_object_array_add(json_community_list, json_string);
+			}
 			pnt += strlen(pnt);
 			break;
 		}
 	}
 	*pnt = '\0';
 
-	json_object_string_add(com->json, "string", str);
-	json_object_object_add(com->json, "list", json_community_list);
+	if (make_json) {
+		json_object_string_add(com->json, "string", str);
+		json_object_object_add(com->json, "list", json_community_list);
+	}
 	com->str = str;
 }
 
@@ -327,7 +355,7 @@ struct community *community_intern(struct community *com)
 
 	/* Make string.  */
 	if (!find->str)
-		set_community_string(find);
+		set_community_string(find, false);
 
 	return find;
 }
@@ -385,13 +413,16 @@ struct community *community_dup(struct community *com)
 }
 
 /* Retrun string representation of communities attribute. */
-char *community_str(struct community *com)
+char *community_str(struct community *com, bool make_json)
 {
 	if (!com)
 		return NULL;
 
+	if (make_json && !com->json && com->str)
+		XFREE(MTYPE_COMMUNITY_STR, com->str);
+
 	if (!com->str)
-		set_community_string(com);
+		set_community_string(com, make_json);
 	return com->str;
 }
 
@@ -399,19 +430,9 @@ char *community_str(struct community *com)
    hash package.*/
 unsigned int community_hash_make(struct community *com)
 {
-	unsigned char *pnt = (unsigned char *)com->val;
-	int size = com->size * 4;
-	unsigned int key = 0;
-	int c;
+	u_int32_t *pnt = (u_int32_t *)com->val;
 
-	for (c = 0; c < size; c += 4) {
-		key += pnt[c];
-		key += pnt[c + 1];
-		key += pnt[c + 2];
-		key += pnt[c + 3];
-	}
-
-	return key;
+	return jhash2(pnt, com->size, 0x43ea96c1);
 }
 
 int community_match(const struct community *com1, const struct community *com2)
@@ -480,6 +501,7 @@ enum community_token {
 	community_token_no_export,
 	community_token_no_advertise,
 	community_token_local_as,
+	community_token_gshut,
 	community_token_unknown
 };
 
@@ -521,6 +543,12 @@ community_gettoken(const char *buf, enum community_token *token, u_int32_t *val)
 			*val = COMMUNITY_LOCAL_AS;
 			*token = community_token_local_as;
 			p += strlen("local-AS");
+			return p;
+		}
+		if (strncmp(p, "graceful-shutdown", strlen("graceful-shutdown")) == 0) {
+			*val = COMMUNITY_GSHUT;
+			*token = community_token_gshut;
+			p += strlen("graceful-shutdown");
 			return p;
 		}
 
@@ -595,6 +623,7 @@ struct community *community_str2com(const char *str)
 		case community_token_no_export:
 		case community_token_no_advertise:
 		case community_token_local_as:
+		case community_token_gshut:
 			if (com == NULL) {
 				com = community_new();
 				com->json = NULL;
@@ -635,7 +664,8 @@ void community_init(void)
 {
 	comhash = hash_create(
 		(unsigned int (*)(void *))community_hash_make,
-		(int (*)(const void *, const void *))community_cmp, NULL);
+		(int (*)(const void *, const void *))community_cmp,
+		"BGP Community Hash");
 }
 
 void community_finish(void)

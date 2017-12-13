@@ -3,9 +3,10 @@
 AUTOMAKE_OPTIONS = subdir-objects 1.12
 include common.am
 
-AM_CPPFLAGS = -I$(top_srcdir) -I$(top_srcdir)/lib -I$(top_builddir) -I$(top_builddir)/lib
+AM_CPPFLAGS = -I$(top_srcdir) -I$(top_srcdir)/include -I$(top_srcdir)/lib \
+	      -I$(top_builddir) -I$(top_builddir)/include -I$(top_builddir)/lib
 AM_CFLAGS = $(WERROR)
-DEFS = @DEFS@ -DSYSCONFDIR=\"$(sysconfdir)/\"
+DEFS = @DEFS@ -DSYSCONFDIR=\"$(sysconfdir)/\" -DCONFDATE=$(CONFDATE)
 LIBCAP = @LIBCAP@
 
 EXTRA_DIST =
@@ -16,6 +17,7 @@ examplesdir = $(exampledir)
 
 bin_PROGRAMS =
 sbin_PROGRAMS =
+sbin_SCRIPTS =
 noinst_PROGRAMS =
 noinst_HEADERS =
 noinst_LIBRARIES =
@@ -25,10 +27,21 @@ pkginclude_HEADERS =
 nodist_pkginclude_HEADERS =
 dist_examples_DATA =
 
+## libtool, the self-made GNU scourge
+## ... this should fix relinking
+## ... and AUTOMAKE_DUMMY is needed to prevent automake from treating this
+##     as overriding the normal targets...
+$(AUTOMAKE_DUMMY)install-moduleLTLIBRARIES: install-libLTLIBRARIES
+$(AUTOMAKE_DUMMY)install-binPROGRAMS: install-libLTLIBRARIES
+$(AUTOMAKE_DUMMY)install-sbinPROGRAMS: install-libLTLIBRARIES
+
+include include/subdir.am
 include lib/subdir.am
 include zebra/subdir.am
+include watchfrr/subdir.am
 include qpb/subdir.am
 include fpm/subdir.am
+include tools/subdir.am
 
 include ripd/subdir.am
 include ripngd/subdir.am
@@ -40,17 +53,19 @@ include nhrpd/subdir.am
 include ldpd/subdir.am
 include babeld/subdir.am
 include eigrpd/subdir.am
+include sharpd/subdir.am
+include pimd/subdir.am
 
 SUBDIRS = . @LIBRFP@ @RFPTEST@ \
 	 @BGPD@ \
-         @PIMD@ \
-	 @WATCHFRR@ @VTYSH@ @DOC@ \
-         @SOLARIS@ tests tools
+	 @VTYSH@ @DOC@ \
+         @SOLARIS@ tests
 
 DIST_SUBDIRS = . bgpd \
-	  watchfrr vtysh doc tests \
-	  solaris pimd bgpd/rfp-example/librfp \
-	  bgpd/rfp-example/rfptest tools \
+	  vtysh doc tests \
+	  solaris bgpd/rfp-example/librfp \
+	  bgpd/rfp-example/rfptest \
+	  debianpkg \
 	  # end
 
 if PKGSRC
@@ -91,12 +106,6 @@ EXTRA_DIST += \
 	snapcraft/defaults \
 	snapcraft/helpers \
 	snapcraft/snap \
-	\
-	tools/multiple-bgpd.sh \
-	tools/rrcheck.pl \
-	tools/rrlookup.pl \
-	tools/zc.pl \
-	tools/zebra.el \
 	\
 	vtysh/Makefile.am \
 	vtysh/Makefile.in \

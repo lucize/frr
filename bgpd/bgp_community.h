@@ -48,6 +48,7 @@ struct community {
 #define COMMUNITY_NO_ADVERTISE          0xFFFFFF02
 #define COMMUNITY_NO_EXPORT_SUBCONFED   0xFFFFFF03
 #define COMMUNITY_LOCAL_AS              0xFFFFFF03
+#define COMMUNITY_GSHUT                 0xFFFF0000
 
 /* Macros of community attribute.  */
 #define com_length(X)    ((X)->size * 4)
@@ -62,7 +63,7 @@ extern struct community *community_uniq_sort(struct community *);
 extern struct community *community_parse(u_int32_t *, u_short);
 extern struct community *community_intern(struct community *);
 extern void community_unintern(struct community **);
-extern char *community_str(struct community *);
+extern char *community_str(struct community *, bool make_json);
 extern unsigned int community_hash_make(struct community *);
 extern struct community *community_str2com(const char *);
 extern int community_match(const struct community *, const struct community *);

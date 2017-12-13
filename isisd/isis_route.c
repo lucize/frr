@@ -208,9 +208,6 @@ static void adjinfo2nexthop(struct list *nexthops, struct isis_adjacency *adj)
 {
 	struct isis_nexthop *nh;
 
-	if (!adj->ipv4_address_count)
-		return;
-
 	for (unsigned int i = 0; i < adj->ipv4_address_count; i++) {
 		struct in_addr *ipv4_addr = &adj->ipv4_addresses[i];
 		if (!nexthoplookup(nexthops, ipv4_addr,
@@ -219,6 +216,7 @@ static void adjinfo2nexthop(struct list *nexthops, struct isis_adjacency *adj)
 				ipv4_addr, adj->circuit->interface->ifindex);
 			nh->router_address = adj->router_address;
 			listnode_add(nexthops, nh);
+			return;
 		}
 	}
 }
@@ -226,9 +224,6 @@ static void adjinfo2nexthop(struct list *nexthops, struct isis_adjacency *adj)
 static void adjinfo2nexthop6(struct list *nexthops6, struct isis_adjacency *adj)
 {
 	struct isis_nexthop6 *nh6;
-
-	if (!adj->ipv6_address_count)
-		return;
 
 	for (unsigned int i = 0; i < adj->ipv6_address_count; i++) {
 		struct in6_addr *ipv6_addr = &adj->ipv6_addresses[i];
@@ -238,6 +233,7 @@ static void adjinfo2nexthop6(struct list *nexthops6, struct isis_adjacency *adj)
 				ipv6_addr, adj->circuit->interface->ifindex);
 			nh6->router_address6 = adj->router_address6;
 			listnode_add(nexthops6, nh6);
+			return;
 		}
 	}
 }
@@ -293,13 +289,13 @@ static void isis_route_info_delete(struct isis_route_info *route_info)
 	if (route_info->nexthops) {
 		route_info->nexthops->del =
 			(void (*)(void *))isis_nexthop_delete;
-		list_delete(route_info->nexthops);
+		list_delete_and_null(&route_info->nexthops);
 	}
 
 	if (route_info->nexthops6) {
 		route_info->nexthops6->del =
 			(void (*)(void *))isis_nexthop6_delete;
-		list_delete(route_info->nexthops6);
+		list_delete_and_null(&route_info->nexthops6);
 	}
 
 	XFREE(MTYPE_ISIS_ROUTE_INFO, route_info);

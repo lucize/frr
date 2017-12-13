@@ -19,11 +19,13 @@ int isis_sock_init(struct isis_circuit *circuit)
 	return 0;
 }
 
+struct zebra_privs_t isisd_privs;
+
 static bool atexit_registered;
 
 static void show_meminfo_at_exit(void)
 {
-	log_memstats_stderr("isis fuzztest");
+	log_memstats(stderr, "isis fuzztest");
 }
 
 static int comp_line(const void *p1, const void *p2)
@@ -166,7 +168,7 @@ static int test(FILE *input, FILE *output)
 		sbuf_push(&fragment_format, 0, "%s", isis_format_tlvs(tlvs));
 		isis_free_tlvs(tlvs);
 	}
-	list_delete(fragments);
+	list_delete_and_null(&fragments);
 	stream_free(s);
 
 	char *fragment_content = sortlines((char *)sbuf_buf(&fragment_format));

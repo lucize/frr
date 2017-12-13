@@ -25,6 +25,7 @@
 #include "log.h"
 #include "sockunion.h"
 #include "qobj.h"
+#include "compiler.h"
 
 #define VTY_BUFSIZ 4096
 #define VTY_MAXHIST 20
@@ -124,6 +125,12 @@ struct vty {
 
 	/* What address is this vty comming from. */
 	char address[SU_ADDRSTRLEN];
+
+	/* "frame" output.  This is buffered and will be printed if some
+	 * actual output follows, or will be discarded if the frame ends
+	 * without any output. */
+	size_t frame_pos;
+	char frame[1024];
 };
 
 static inline void vty_push_context(struct vty *vty, int node, uint64_t id)
@@ -182,23 +189,11 @@ struct vty_arg {
 /* Integrated configuration file. */
 #define INTEGRATE_DEFAULT_CONFIG "frr.conf"
 
-/* for compatibility */
-#if defined(__ICC)
-#define CPP_WARN_STR(X) #X
-#define CPP_WARN(text) _Pragma(CPP_WARN_STR(message __FILE__ ": " text))
-
-#elif (defined(__GNUC__)                                                       \
-       && (__GNUC__ >= 5 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8)))           \
-	|| (defined(__clang__)                                                 \
-	    && (__clang_major__ >= 4                                           \
-		|| (__clang_major__ == 3 && __clang_minor__ >= 5)))
-#define CPP_WARN_STR(X) #X
-#define CPP_WARN(text) _Pragma(CPP_WARN_STR(GCC warning text))
-
-#else
-#define CPP_WARN(text)
+#if CONFDATE > 20180401
+CPP_NOTICE("It's probably time to remove VTY_NEWLINE compatibility foo.")
 #endif
 
+/* for compatibility */
 #define VNL "\n" CPP_WARN("VNL has been replaced with \\n.")
 #define VTYNL "\n" CPP_WARN("VTYNL has been replaced with \\n.")
 #define VTY_NEWLINE "\n" CPP_WARN("VTY_NEWLINE has been replaced with \\n.")
@@ -258,7 +253,16 @@ extern void vty_terminate(void);
 extern void vty_reset(void);
 extern struct vty *vty_new(void);
 extern struct vty *vty_stdio(void (*atclose)(int isexit));
+
+/* - vty_frame() output goes to a buffer (for context-begin markers)
+ * - vty_out() will first print this buffer, and clear it
+ * - vty_endframe() clears the buffer without printing it, and prints an
+ *   extra string if the buffer was empty before (for context-end markers)
+ */
 extern int vty_out(struct vty *, const char *, ...) PRINTF_ATTRIBUTE(2, 3);
+extern void vty_frame(struct vty *, const char *, ...) PRINTF_ATTRIBUTE(2, 3);
+extern void vty_endframe(struct vty *, const char *);
+
 extern void vty_read_config(const char *, char *);
 extern void vty_time_print(struct vty *, int);
 extern void vty_serv_sock(const char *, unsigned short, const char *);

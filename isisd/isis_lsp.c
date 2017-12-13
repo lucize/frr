@@ -111,32 +111,22 @@ static void lsp_clear_data(struct isis_lsp *lsp)
 
 static void lsp_destroy(struct isis_lsp *lsp)
 {
-	struct listnode *cnode, *lnode, *lnnode;
-	struct isis_lsp *lsp_in_list;
+	struct listnode *cnode;
 	struct isis_circuit *circuit;
 
 	if (!lsp)
 		return;
 
-	if (lsp->area->circuit_list) {
-		for (ALL_LIST_ELEMENTS_RO(lsp->area->circuit_list, cnode,
-					  circuit)) {
-			if (circuit->lsp_queue == NULL)
-				continue;
-			for (ALL_LIST_ELEMENTS(circuit->lsp_queue, lnode,
-					       lnnode, lsp_in_list))
-				if (lsp_in_list == lsp)
-					list_delete_node(circuit->lsp_queue,
-							 lnode);
-		}
-	}
+	for (ALL_LIST_ELEMENTS_RO(lsp->area->circuit_list, cnode, circuit))
+		isis_circuit_cancel_queued_lsp(circuit, lsp);
+
 	ISIS_FLAGS_CLEAR_ALL(lsp->SSNflags);
 	ISIS_FLAGS_CLEAR_ALL(lsp->SRMflags);
 
 	lsp_clear_data(lsp);
 
 	if (LSP_FRAGMENT(lsp->hdr.lsp_id) == 0 && lsp->lspu.frags) {
-		list_delete(lsp->lspu.frags);
+		list_delete_and_null(&lsp->lspu.frags);
 		lsp->lspu.frags = NULL;
 	}
 
@@ -290,12 +280,21 @@ int lsp_compare(char *areatag, struct isis_lsp *lsp, uint32_t seqno,
 	return LSP_OLDER;
 }
 
-static void put_lsp_hdr(struct isis_lsp *lsp, size_t *len_pointer)
+static void put_lsp_hdr(struct isis_lsp *lsp, size_t *len_pointer, bool keep)
 {
 	uint8_t pdu_type =
 		(lsp->level == IS_LEVEL_1) ? L1_LINK_STATE : L2_LINK_STATE;
 	struct isis_lsp_hdr *hdr = &lsp->hdr;
 	struct stream *stream = lsp->pdu;
+	size_t orig_getp, orig_endp;
+
+	if (keep) {
+		orig_getp = stream_get_getp(lsp->pdu);
+		orig_endp = stream_get_endp(lsp->pdu);
+	}
+
+	stream_set_getp(lsp->pdu, 0);
+	stream_set_endp(lsp->pdu, 0);
 
 	fill_fixed_hdr(pdu_type, stream);
 
@@ -307,6 +306,11 @@ static void put_lsp_hdr(struct isis_lsp *lsp, size_t *len_pointer)
 	stream_putl(stream, hdr->seqno);
 	stream_putw(stream, hdr->checksum);
 	stream_putc(stream, hdr->lsp_bits);
+
+	if (keep) {
+		stream_set_endp(lsp->pdu, orig_endp);
+		stream_set_getp(lsp->pdu, orig_getp);
+	}
 }
 
 static void lsp_add_auth(struct isis_lsp *lsp)
@@ -325,8 +329,7 @@ static void lsp_pack_pdu(struct isis_lsp *lsp)
 	lsp_add_auth(lsp);
 
 	size_t len_pointer;
-	stream_reset(lsp->pdu);
-	put_lsp_hdr(lsp, &len_pointer);
+	put_lsp_hdr(lsp, &len_pointer, false);
 	isis_pack_tlvs(lsp->tlvs, lsp->pdu, len_pointer, false, true);
 
 	lsp->hdr.pdu_len = stream_get_endp(lsp->pdu);
@@ -434,45 +437,6 @@ static void lsp_update_data(struct isis_lsp *lsp, struct isis_lsp_hdr *hdr,
 	return;
 }
 
-void lsp_update(struct isis_lsp *lsp, struct isis_lsp_hdr *hdr,
-		struct isis_tlvs *tlvs, struct stream *stream,
-		struct isis_area *area, int level, bool confusion)
-{
-	dnode_t *dnode = NULL;
-
-	/* Remove old LSP from database. This is required since the
-	 * lsp_update_data will free the lsp->pdu (which has the key, lsp_id)
-	 * and will update it with the new data in the stream.
-	 * XXX: This doesn't hold true anymore since the header is now a copy.
-	 * keeping the LSP in the dict if it is already present should be possible */
-	dnode = dict_lookup(area->lspdb[level - 1], lsp->hdr.lsp_id);
-	if (dnode)
-		dnode_destroy(dict_delete(area->lspdb[level - 1], dnode));
-
-	if (lsp->own_lsp) {
-		zlog_err(
-			"ISIS-Upd (%s): BUG updating LSP %s still marked as own LSP",
-			area->area_tag, rawlspid_print(lsp->hdr.lsp_id));
-		lsp_clear_data(lsp);
-		lsp->own_lsp = 0;
-	}
-
-	if (confusion) {
-		lsp_clear_data(lsp);
-		if (lsp->pdu != NULL)
-			stream_free(lsp->pdu);
-		lsp->pdu = stream_new(LLC_LEN + area->lsp_mtu);
-		lsp->age_out = ZERO_AGE_LIFETIME;
-		lsp->hdr.rem_lifetime = 0;
-		lsp_pack_pdu(lsp);
-	} else {
-		lsp_update_data(lsp, hdr, tlvs, stream, area, level);
-	}
-
-	/* insert the lsp back into the database */
-	lsp_insert(lsp, area->lspdb[level - 1]);
-}
-
 static void lsp_link_fragment(struct isis_lsp *lsp, struct isis_lsp *lsp0)
 {
 	if (!LSP_FRAGMENT(lsp->hdr.lsp_id)) {
@@ -484,6 +448,39 @@ static void lsp_link_fragment(struct isis_lsp *lsp, struct isis_lsp *lsp0)
 		lsp->lspu.zero_lsp = lsp0;
 		listnode_add(lsp0->lspu.frags, lsp);
 	}
+}
+
+void lsp_update(struct isis_lsp *lsp, struct isis_lsp_hdr *hdr,
+		struct isis_tlvs *tlvs, struct stream *stream,
+		struct isis_area *area, int level, bool confusion)
+{
+	if (lsp->own_lsp) {
+		zlog_err(
+			"ISIS-Upd (%s): BUG updating LSP %s still marked as own LSP",
+			area->area_tag, rawlspid_print(lsp->hdr.lsp_id));
+		lsp_clear_data(lsp);
+		lsp->own_lsp = 0;
+	}
+
+	lsp_update_data(lsp, hdr, tlvs, stream, area, level);
+	if (confusion) {
+		lsp->hdr.rem_lifetime = hdr->rem_lifetime = 0;
+		put_lsp_hdr(lsp, NULL, true);
+	}
+
+	if (LSP_FRAGMENT(lsp->hdr.lsp_id) && !lsp->lspu.zero_lsp) {
+		uint8_t lspid[ISIS_SYS_ID_LEN + 2];
+		struct isis_lsp *lsp0;
+
+		memcpy(lspid, lsp->hdr.lsp_id, ISIS_SYS_ID_LEN + 1);
+		LSP_FRAGMENT(lspid) = 0;
+		lsp0 = lsp_search(lspid, area->lspdb[level - 1]);
+		if (lsp0)
+			lsp_link_fragment(lsp, lsp0);
+	}
+
+	if (lsp->hdr.seqno)
+		isis_spf_schedule(lsp->area, lsp->level);
 }
 
 /* creation of LSP directly from what we received */
@@ -523,7 +520,7 @@ struct isis_lsp *lsp_new(struct isis_area *area, u_char *lsp_id,
 	lsp->level = level;
 	lsp->age_out = ZERO_AGE_LIFETIME;
 	lsp_link_fragment(lsp, lsp0);
-	put_lsp_hdr(lsp, NULL);
+	put_lsp_hdr(lsp, NULL, false);
 
 	if (isis->debugs & DEBUG_EVENTS)
 		zlog_debug("New LSP with ID %s-%02x-%02x len %d seqnum %08x",
@@ -600,7 +597,7 @@ static void lspid_print(u_char *lsp_id, u_char *trg, char dynhost, char frag)
 	if (dyn)
 		sprintf((char *)id, "%.14s", dyn->hostname);
 	else if (!memcmp(isis->sysid, lsp_id, ISIS_SYS_ID_LEN) && dynhost)
-		sprintf((char *)id, "%.14s", unix_hostname());
+		sprintf((char *)id, "%.14s", cmd_hostname_get());
 	else
 		memcpy(id, sysid_print(lsp_id), 15);
 	if (frag)
@@ -802,6 +799,8 @@ static struct isis_lsp *lsp_next_frag(uint8_t frag_num, struct isis_lsp *lsp0,
 	lsp = lsp_search(frag_id, area->lspdb[level - 1]);
 	if (lsp) {
 		lsp_clear_data(lsp);
+		if (!lsp->lspu.zero_lsp)
+			lsp_link_fragment(lsp, lsp0);
 		return lsp;
 	}
 
@@ -880,9 +879,9 @@ static void lsp_build(struct isis_lsp *lsp, struct isis_area *area)
 	}
 	/* Dynamic Hostname */
 	if (area->dynhostname) {
-		isis_tlvs_set_dynamic_hostname(lsp->tlvs, unix_hostname());
+		isis_tlvs_set_dynamic_hostname(lsp->tlvs, cmd_hostname_get());
 		lsp_debug("ISIS (%s): Adding dynamic hostname '%s'",
-			  area->area_tag, unix_hostname());
+			  area->area_tag, cmd_hostname_get());
 	} else {
 		lsp_debug("ISIS (%s): Not adding dynamic hostname (disabled)",
 			  area->area_tag);
@@ -1113,16 +1112,27 @@ static void lsp_build(struct isis_lsp *lsp, struct isis_area *area)
 	}
 	isis_free_tlvs(tlvs);
 
+	bool fragment_overflow = false;
 	frag = lsp;
 	for (ALL_LIST_ELEMENTS_RO(fragments, node, tlvs)) {
 		if (node != listhead(fragments)) {
+			if (LSP_FRAGMENT(frag->hdr.lsp_id) == 255) {
+				if (!fragment_overflow) {
+					fragment_overflow = true;
+					zlog_warn("ISIS (%s): Too much information for 256 fragments",
+						  area->area_tag);
+				}
+				isis_free_tlvs(tlvs);
+				continue;
+			}
+
 			frag = lsp_next_frag(LSP_FRAGMENT(frag->hdr.lsp_id) + 1,
 					     lsp, area, level);
 		}
 		frag->tlvs = tlvs;
 	}
 
-	list_delete(fragments);
+	list_delete_and_null(&fragments);
 	lsp_debug("ISIS (%s): LSP construction is complete. Serializing...",
 		  area->area_tag);
 	return;
@@ -1237,6 +1247,7 @@ static int lsp_regenerate(struct isis_area *area, int level)
 		 * so that no fragment expires before the lsp is refreshed.
 		 */
 		frag->hdr.rem_lifetime = rem_lifetime;
+		frag->age_out = ZERO_AGE_LIFETIME;
 		lsp_set_all_srmflags(frag);
 	}
 	lsp_seqno_update(lsp);
@@ -1499,7 +1510,7 @@ static void lsp_build_pseudo(struct isis_lsp *lsp, struct isis_circuit *circuit,
 				LSP_PSEUDO_ID(ne_id));
 		}
 	}
-	list_delete(adj_list);
+	list_delete_and_null(&adj_list);
 	return;
 }
 
@@ -1783,6 +1794,7 @@ int lsp_tick(struct thread *thread)
 	dnode_t *dnode, *dnode_next;
 	int level;
 	u_int16_t rem_lifetime;
+        time_t now = monotime(NULL);
 
 	lsp_list = list_new();
 
@@ -1858,12 +1870,16 @@ int lsp_tick(struct thread *thread)
 			if (listcount(lsp_list) > 0) {
 				for (ALL_LIST_ELEMENTS_RO(area->circuit_list,
 							  cnode, circuit)) {
-					int diff =
-						time(NULL)
-						- circuit->lsp_queue_last_cleared;
-					if (circuit->lsp_queue == NULL
-					    || diff < MIN_LSP_TRANS_INTERVAL)
+					if (!circuit->lsp_queue)
 						continue;
+
+					if (now - circuit->lsp_queue_last_push
+					    < MIN_LSP_RETRANS_INTERVAL) {
+						continue;
+					}
+
+					circuit->lsp_queue_last_push = now;
+
 					for (ALL_LIST_ELEMENTS_RO(
 						     lsp_list, lspnode, lsp)) {
 						if (circuit->upadjcount
@@ -1871,23 +1887,7 @@ int lsp_tick(struct thread *thread)
 						    && ISIS_CHECK_FLAG(
 							       lsp->SRMflags,
 							       circuit)) {
-							/* Add the lsp only if
-							 * it is not already in
-							 * lsp
-							 * queue */
-							if (!listnode_lookup(
-								    circuit->lsp_queue,
-								    lsp)) {
-								listnode_add(
-									circuit->lsp_queue,
-									lsp);
-								thread_add_event(
-									master,
-									send_lsp,
-									circuit,
-									0,
-									NULL);
-							}
+							isis_circuit_queue_lsp(circuit, lsp);
 						}
 					}
 				}
@@ -1896,7 +1896,7 @@ int lsp_tick(struct thread *thread)
 		}
 	}
 
-	list_delete(lsp_list);
+	list_delete_and_null(&lsp_list);
 
 	return ISIS_OK;
 }

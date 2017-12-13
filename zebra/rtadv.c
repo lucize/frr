@@ -62,6 +62,10 @@ extern struct zebra_privs_t zserv_privs;
 #define ALLNODE   "ff02::1"
 #define ALLROUTER "ff02::2"
 
+/* Order is intentional.  Matches RFC4191.  This array is also used for
+   command matching, so only modify with care. */
+const char *rtadv_pref_strs[] = {"medium", "high", "INVALID", "low", 0};
+
 enum rtadv_event {
 	RTADV_START,
 	RTADV_STOP,
@@ -103,6 +107,7 @@ static int rtadv_recv_packet(struct zebra_ns *zns, int sock, u_char *buf,
 	char adata[1024];
 
 	/* Fill in message and iovec. */
+	memset(&msg, 0, sizeof(msg));
 	msg.msg_name = (void *)from;
 	msg.msg_namelen = sizeof(struct sockaddr_in6);
 	msg.msg_iov = &iov;
@@ -171,11 +176,13 @@ static void rtadv_send_packet(int sock, struct interface *ifp)
 	 */
 	if (adata == NULL) {
 		/* XXX Free on shutdown. */
-		adata = malloc(CMSG_SPACE(sizeof(struct in6_pktinfo)));
+		adata = calloc(1, CMSG_SPACE(sizeof(struct in6_pktinfo)));
 
-		if (adata == NULL)
+		if (adata == NULL) {
 			zlog_err(
 				"rtadv_send_packet: can't malloc control data");
+			exit(-1);
+		}
 	}
 
 	/* Logging of packet. */
@@ -376,7 +383,6 @@ static int rtadv_timer(struct thread *thread)
 {
 	struct zebra_ns *zns = THREAD_ARG(thread);
 	struct vrf *vrf;
-	struct listnode *node, *nnode;
 	struct interface *ifp;
 	struct zebra_if *zif;
 	int period;
@@ -390,41 +396,48 @@ static int rtadv_timer(struct thread *thread)
 		rtadv_event(zns, RTADV_TIMER_MSEC, 10 /* 10 ms */);
 	}
 
-	RB_FOREACH(vrf, vrf_id_head, &vrfs_by_id)
-	for (ALL_LIST_ELEMENTS(vrf->iflist, node, nnode, ifp)) {
-		if (if_is_loopback(ifp)
-		    || CHECK_FLAG(ifp->status, ZEBRA_INTERFACE_VRF_LOOPBACK)
-		    || !if_is_operative(ifp))
-			continue;
+	RB_FOREACH (vrf, vrf_id_head, &vrfs_by_id)
+		FOR_ALL_INTERFACES (vrf, ifp) {
+			if (if_is_loopback(ifp)
+			    || CHECK_FLAG(ifp->status,
+					  ZEBRA_INTERFACE_VRF_LOOPBACK)
+			    || !if_is_operative(ifp))
+				continue;
 
-		zif = ifp->info;
+			zif = ifp->info;
 
-		if (zif->rtadv.AdvSendAdvertisements) {
-			if (zif->rtadv.inFastRexmit) {
-				/* We assume we fast rexmit every sec so no
-				 * additional vars */
-				if (--zif->rtadv.NumFastReXmitsRemain <= 0)
-					zif->rtadv.inFastRexmit = 0;
+			if (zif->rtadv.AdvSendAdvertisements) {
+				if (zif->rtadv.inFastRexmit) {
+					/* We assume we fast rexmit every sec so
+					 * no
+					 * additional vars */
+					if (--zif->rtadv.NumFastReXmitsRemain
+					    <= 0)
+						zif->rtadv.inFastRexmit = 0;
 
-				if (IS_ZEBRA_DEBUG_SEND)
-					zlog_debug(
-						"Fast RA Rexmit on interface %s",
-						ifp->name);
+					if (IS_ZEBRA_DEBUG_SEND)
+						zlog_debug(
+							"Fast RA Rexmit on interface %s",
+							ifp->name);
 
-				rtadv_send_packet(zns->rtadv.sock, ifp);
-			} else {
-				zif->rtadv.AdvIntervalTimer -= period;
-				if (zif->rtadv.AdvIntervalTimer <= 0) {
-					/* FIXME: using MaxRtrAdvInterval each
-					   time isn't what section
-					   6.2.4 of RFC4861 tells to do. */
-					zif->rtadv.AdvIntervalTimer =
-						zif->rtadv.MaxRtrAdvInterval;
 					rtadv_send_packet(zns->rtadv.sock, ifp);
+				} else {
+					zif->rtadv.AdvIntervalTimer -= period;
+					if (zif->rtadv.AdvIntervalTimer <= 0) {
+						/* FIXME: using
+						   MaxRtrAdvInterval each
+						   time isn't what section
+						   6.2.4 of RFC4861 tells to do.
+						   */
+						zif->rtadv.AdvIntervalTimer =
+							zif->rtadv
+								.MaxRtrAdvInterval;
+						rtadv_send_packet(
+							zns->rtadv.sock, ifp);
+					}
 				}
 			}
 		}
-	}
 
 	return 0;
 }
@@ -625,7 +638,6 @@ static int rtadv_make_socket(void)
 			 safe_strerror(errno));
 
 	if (sock < 0) {
-		close(sock);
 		return -1;
 	}
 
@@ -663,6 +675,7 @@ static int rtadv_make_socket(void)
 			 sizeof(struct icmp6_filter));
 	if (ret < 0) {
 		zlog_info("ICMP6_FILTER set fail: %s", safe_strerror(errno));
+		close(sock);
 		return ret;
 	}
 
@@ -787,11 +800,11 @@ static void ipv6_nd_suppress_ra_set(struct interface *ifp,
  * if the operator has explicitly enabled RA. The enable request can also
  * specify a RA interval (in seconds).
  */
-void zebra_interface_radv_set(struct zserv *client, int sock, u_short length,
+void zebra_interface_radv_set(struct zserv *client, u_short length,
 			      struct zebra_vrf *zvrf, int enable)
 {
 	struct stream *s;
-	unsigned int ifindex;
+	ifindex_t ifindex;
 	struct interface *ifp;
 	struct zebra_if *zif;
 	int ra_interval;
@@ -799,8 +812,8 @@ void zebra_interface_radv_set(struct zserv *client, int sock, u_short length,
 	s = client->ibuf;
 
 	/* Get interface index and RA interval. */
-	ifindex = stream_getl(s);
-	ra_interval = stream_getl(s);
+	STREAM_GETL(s, ifindex);
+	STREAM_GETL(s, ra_interval);
 
 	if (IS_ZEBRA_DEBUG_EVENT)
 		zlog_debug("%u: IF %u RA %s from client %s, interval %ds",
@@ -825,17 +838,24 @@ void zebra_interface_radv_set(struct zserv *client, int sock, u_short length,
 
 	zif = ifp->info;
 	if (enable) {
+		SET_FLAG(zif->rtadv.ra_configured, BGP_RA_CONFIGURED);
 		ipv6_nd_suppress_ra_set(ifp, RA_ENABLE);
 		if (ra_interval
-		    && (ra_interval * 1000) < zif->rtadv.MaxRtrAdvInterval)
+			&& (ra_interval * 1000) < zif->rtadv.MaxRtrAdvInterval
+			&& !CHECK_FLAG(zif->rtadv.ra_configured,
+				VTY_RA_INTERVAL_CONFIGURED))
 			zif->rtadv.MaxRtrAdvInterval = ra_interval * 1000;
 	} else {
-		if (!zif->rtadv.configured) {
+		UNSET_FLAG(zif->rtadv.ra_configured, BGP_RA_CONFIGURED);
+		if (!CHECK_FLAG(zif->rtadv.ra_configured,
+				VTY_RA_INTERVAL_CONFIGURED))
 			zif->rtadv.MaxRtrAdvInterval =
 				RTADV_MAX_RTR_ADV_INTERVAL;
+		if (!CHECK_FLAG(zif->rtadv.ra_configured, VTY_RA_CONFIGURED))
 			ipv6_nd_suppress_ra_set(ifp, RA_SUPPRESS);
-		}
 	}
+stream_failure:
+	return;
 }
 
 DEFUN (ipv6_nd_suppress_ra,
@@ -855,8 +875,10 @@ DEFUN (ipv6_nd_suppress_ra,
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
-	ipv6_nd_suppress_ra_set(ifp, RA_SUPPRESS);
-	zif->rtadv.configured = 0;
+	if (!CHECK_FLAG(zif->rtadv.ra_configured, BGP_RA_CONFIGURED))
+		ipv6_nd_suppress_ra_set(ifp, RA_SUPPRESS);
+
+	UNSET_FLAG(zif->rtadv.ra_configured, VTY_RA_CONFIGURED);
 	return CMD_SUCCESS;
 }
 
@@ -879,7 +901,7 @@ DEFUN (no_ipv6_nd_suppress_ra,
 	}
 
 	ipv6_nd_suppress_ra_set(ifp, RA_ENABLE);
-	zif->rtadv.configured = 1;
+	SET_FLAG(zif->rtadv.ra_configured, VTY_RA_CONFIGURED);
 	return CMD_SUCCESS;
 }
 
@@ -914,6 +936,7 @@ DEFUN (ipv6_nd_ra_interval_msec,
 	if (interval % 1000)
 		zns->rtadv.adv_msec_if_count++;
 
+	SET_FLAG(zif->rtadv.ra_configured, VTY_RA_INTERVAL_CONFIGURED);
 	zif->rtadv.MaxRtrAdvInterval = interval;
 	zif->rtadv.MinRtrAdvInterval = 0.33 * interval;
 	zif->rtadv.AdvIntervalTimer = 0;
@@ -951,6 +974,7 @@ DEFUN (ipv6_nd_ra_interval,
 	/* convert to milliseconds */
 	interval = interval * 1000;
 
+	SET_FLAG(zif->rtadv.ra_configured, VTY_RA_INTERVAL_CONFIGURED);
 	zif->rtadv.MaxRtrAdvInterval = interval;
 	zif->rtadv.MinRtrAdvInterval = 0.33 * interval;
 	zif->rtadv.AdvIntervalTimer = 0;
@@ -980,9 +1004,15 @@ DEFUN (no_ipv6_nd_ra_interval,
 	if (zif->rtadv.MaxRtrAdvInterval % 1000)
 		zns->rtadv.adv_msec_if_count--;
 
-	zif->rtadv.MaxRtrAdvInterval = RTADV_MAX_RTR_ADV_INTERVAL;
-	zif->rtadv.MinRtrAdvInterval = RTADV_MIN_RTR_ADV_INTERVAL;
+	UNSET_FLAG(zif->rtadv.ra_configured, VTY_RA_INTERVAL_CONFIGURED);
+
+	if (CHECK_FLAG(zif->rtadv.ra_configured, BGP_RA_CONFIGURED))
+		zif->rtadv.MaxRtrAdvInterval = 10000;
+	else
+		zif->rtadv.MaxRtrAdvInterval = RTADV_MAX_RTR_ADV_INTERVAL;
+
 	zif->rtadv.AdvIntervalTimer = zif->rtadv.MaxRtrAdvInterval;
+	zif->rtadv.MinRtrAdvInterval = RTADV_MIN_RTR_ADV_INTERVAL;
 
 	return CMD_SUCCESS;
 }
@@ -1456,9 +1486,76 @@ DEFUN (no_ipv6_nd_mtu,
 	return CMD_SUCCESS;
 }
 
+/* Dump interface ND information to vty. */
+static int nd_dump_vty(struct vty *vty, struct interface *ifp)
+{
+	struct zebra_if *zif;
+	struct rtadvconf *rtadv;
+	int interval;
+
+	zif = (struct zebra_if *)ifp->info;
+	rtadv = &zif->rtadv;
+
+	if (rtadv->AdvSendAdvertisements) {
+		vty_out(vty,
+			"  ND advertised reachable time is %d milliseconds\n",
+			rtadv->AdvReachableTime);
+		vty_out(vty,
+			"  ND advertised retransmit interval is %d milliseconds\n",
+			rtadv->AdvRetransTimer);
+		vty_out(vty, "  ND router advertisements sent: %d rcvd: %d\n",
+			zif->ra_sent, zif->ra_rcvd);
+		interval = rtadv->MaxRtrAdvInterval;
+		if (interval % 1000)
+			vty_out(vty,
+				"  ND router advertisements are sent every "
+				"%d milliseconds\n",
+				interval);
+		else
+			vty_out(vty,
+				"  ND router advertisements are sent every "
+				"%d seconds\n",
+				interval / 1000);
+		if (rtadv->AdvDefaultLifetime != -1)
+			vty_out(vty,
+				"  ND router advertisements live for %d seconds\n",
+				rtadv->AdvDefaultLifetime);
+		else
+			vty_out(vty,
+				"  ND router advertisements lifetime tracks ra-interval\n");
+		vty_out(vty,
+			"  ND router advertisement default router preference is "
+			"%s\n",
+			rtadv_pref_strs[rtadv->DefaultPreference]);
+		if (rtadv->AdvManagedFlag)
+			vty_out(vty,
+				"  Hosts use DHCP to obtain routable addresses.\n");
+		else
+			vty_out(vty,
+				"  Hosts use stateless autoconfig for addresses.\n");
+		if (rtadv->AdvHomeAgentFlag) {
+			vty_out(vty,
+				"  ND router advertisements with Home Agent flag bit set.\n");
+			if (rtadv->HomeAgentLifetime != -1)
+				vty_out(vty,
+					"  Home Agent lifetime is %u seconds\n",
+					rtadv->HomeAgentLifetime);
+			else
+				vty_out(vty,
+					"  Home Agent lifetime tracks ra-lifetime\n");
+			vty_out(vty, "  Home Agent preference is %u\n",
+				rtadv->HomeAgentPreference);
+		}
+		if (rtadv->AdvIntervalOption)
+			vty_out(vty,
+				"  ND router advertisements with Adv. Interval option.\n");
+	}
+	return 0;
+}
+
 
 /* Write configuration about router advertisement. */
-void rtadv_config_write(struct vty *vty, struct interface *ifp)
+static int rtadv_config_write(struct vty *vty, struct interface *ifp)
 {
 	struct zebra_if *zif;
 	struct listnode *node;
@@ -1470,15 +1567,20 @@ void rtadv_config_write(struct vty *vty, struct interface *ifp)
 
 	if (!(if_is_loopback(ifp)
 	      || CHECK_FLAG(ifp->status, ZEBRA_INTERFACE_VRF_LOOPBACK))) {
-		if (zif->rtadv.AdvSendAdvertisements)
+		if (zif->rtadv.AdvSendAdvertisements
+		    && CHECK_FLAG(zif->rtadv.ra_configured, VTY_RA_CONFIGURED))
 			vty_out(vty, " no ipv6 nd suppress-ra\n");
 	}
 
 	interval = zif->rtadv.MaxRtrAdvInterval;
-	if (interval % 1000)
-		vty_out(vty, " ipv6 nd ra-interval msec %d\n", interval);
-	else if (interval != RTADV_MAX_RTR_ADV_INTERVAL)
-		vty_out(vty, " ipv6 nd ra-interval %d\n", interval / 1000);
+	if (CHECK_FLAG(zif->rtadv.ra_configured, VTY_RA_INTERVAL_CONFIGURED)) {
+		if (interval % 1000)
+			vty_out(vty, " ipv6 nd ra-interval msec %d\n",
+				interval);
+		else if (interval != RTADV_MAX_RTR_ADV_INTERVAL)
+			vty_out(vty, " ipv6 nd ra-interval %d\n",
+				interval / 1000);
+	}
 
 	if (zif->rtadv.AdvIntervalOption)
 		vty_out(vty, " ipv6 nd adv-interval-option\n");
@@ -1539,6 +1641,7 @@ void rtadv_config_write(struct vty *vty, struct interface *ifp)
 			vty_out(vty, " router-address");
 		vty_out(vty, "\n");
 	}
+	return 0;
 }
 
 
@@ -1600,6 +1703,9 @@ void rtadv_terminate(struct zebra_ns *zns)
 
 void rtadv_cmd_init(void)
 {
+	hook_register(zebra_if_extra_info, nd_dump_vty);
+	hook_register(zebra_if_config_wr, rtadv_config_write);
+
 	install_element(INTERFACE_NODE, &ipv6_nd_suppress_ra_cmd);
 	install_element(INTERFACE_NODE, &no_ipv6_nd_suppress_ra_cmd);
 	install_element(INTERFACE_NODE, &ipv6_nd_ra_interval_cmd);

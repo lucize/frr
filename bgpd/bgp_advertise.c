@@ -155,22 +155,24 @@ int bgp_adj_out_lookup(struct peer *peer, struct bgp_node *rn,
 	int addpath_capable;
 
 	for (adj = rn->adj_out; adj; adj = adj->next)
-		SUBGRP_FOREACH_PEER(adj->subgroup, paf)
-	if (paf->peer == peer) {
-		afi = SUBGRP_AFI(adj->subgroup);
-		safi = SUBGRP_SAFI(adj->subgroup);
-		addpath_capable = bgp_addpath_encode_tx(peer, afi, safi);
+		SUBGRP_FOREACH_PEER (adj->subgroup, paf)
+			if (paf->peer == peer) {
+				afi = SUBGRP_AFI(adj->subgroup);
+				safi = SUBGRP_SAFI(adj->subgroup);
+				addpath_capable =
+					bgp_addpath_encode_tx(peer, afi, safi);
 
-		/* Match on a specific addpath_tx_id if we are using addpath for
-		 * this
-		 * peer and if an addpath_tx_id was specified */
-		if (addpath_capable && addpath_tx_id
-		    && adj->addpath_tx_id != addpath_tx_id)
-			continue;
+				/* Match on a specific addpath_tx_id if we are
+				 * using addpath for
+				 * this
+				 * peer and if an addpath_tx_id was specified */
+				if (addpath_capable && addpath_tx_id
+				    && adj->addpath_tx_id != addpath_tx_id)
+					continue;
 
-		return (adj->adv ? (adj->adv->baa ? 1 : 0)
-				 : (adj->attr ? 1 : 0));
-	}
+				return (adj->adv ? (adj->adv->baa ? 1 : 0)
+						 : (adj->attr ? 1 : 0));
+			}
 
 	return 0;
 }
@@ -237,17 +239,16 @@ void bgp_sync_init(struct peer *peer)
 	safi_t safi;
 	struct bgp_synchronize *sync;
 
-	for (afi = AFI_IP; afi < AFI_MAX; afi++)
-		for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++) {
-			sync = XCALLOC(MTYPE_BGP_SYNCHRONISE,
-				       sizeof(struct bgp_synchronize));
-			BGP_ADV_FIFO_INIT(&sync->update);
-			BGP_ADV_FIFO_INIT(&sync->withdraw);
-			BGP_ADV_FIFO_INIT(&sync->withdraw_low);
-			peer->sync[afi][safi] = sync;
-			peer->hash[afi][safi] =
-				hash_create(baa_hash_key, baa_hash_cmp, NULL);
-		}
+	FOREACH_AFI_SAFI (afi, safi) {
+		sync = XCALLOC(MTYPE_BGP_SYNCHRONISE,
+			       sizeof(struct bgp_synchronize));
+		BGP_ADV_FIFO_INIT(&sync->update);
+		BGP_ADV_FIFO_INIT(&sync->withdraw);
+		BGP_ADV_FIFO_INIT(&sync->withdraw_low);
+		peer->sync[afi][safi] = sync;
+		peer->hash[afi][safi] = hash_create(baa_hash_key, baa_hash_cmp,
+						    "BGP Sync Hash");
+	}
 }
 
 void bgp_sync_delete(struct peer *peer)
@@ -255,15 +256,13 @@ void bgp_sync_delete(struct peer *peer)
 	afi_t afi;
 	safi_t safi;
 
-	for (afi = AFI_IP; afi < AFI_MAX; afi++)
-		for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++) {
-			if (peer->sync[afi][safi])
-				XFREE(MTYPE_BGP_SYNCHRONISE,
-				      peer->sync[afi][safi]);
-			peer->sync[afi][safi] = NULL;
+	FOREACH_AFI_SAFI (afi, safi) {
+		if (peer->sync[afi][safi])
+			XFREE(MTYPE_BGP_SYNCHRONISE, peer->sync[afi][safi]);
+		peer->sync[afi][safi] = NULL;
 
-			if (peer->hash[afi][safi])
-				hash_free(peer->hash[afi][safi]);
-			peer->hash[afi][safi] = NULL;
-		}
+		if (peer->hash[afi][safi])
+			hash_free(peer->hash[afi][safi]);
+		peer->hash[afi][safi] = NULL;
+	}
 }

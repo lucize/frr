@@ -33,6 +33,7 @@
 #include "lib/log.h"
 #include "lib/skiplist.h"
 #include "lib/thread.h"
+#include "lib/stream.h"
 
 #include "bgpd/bgpd.h"
 #include "bgpd/bgp_ecommunity.h"
@@ -1079,10 +1080,7 @@ int rfapiEcommunityGetEthernetTag(struct ecommunity *ecom, uint16_t *tag_id)
 
 			if (*p++ == ECOMMUNITY_ROUTE_TARGET) {
 				if (encode == ECOMMUNITY_ENCODE_AS4) {
-					as = (*p++ << 24);
-					as |= (*p++ << 16);
-					as |= (*p++ << 8);
-					as |= (*p++);
+					p = ptr_get_be32(p, &as);
 				} else if (encode == ECOMMUNITY_ENCODE_AS) {
 					as = (*p++ << 8);
 					as |= (*p++);
@@ -1224,8 +1222,8 @@ static int rfapiVpnBiSamePtUn(struct bgp_info *bi1, struct bgp_info *bi2)
 
 	switch (pfx_un1.family) {
 	case AF_INET:
-		if (!IPV4_ADDR_SAME(&pfx_un1.u.prefix4.s_addr,
-				    &pfx_un2.u.prefix4.s_addr))
+		if (!IPV4_ADDR_SAME(&pfx_un1.u.prefix4,
+				    &pfx_un2.u.prefix4))
 			return 0;
 		break;
 	case AF_INET6:
@@ -1454,7 +1452,7 @@ rfapiRouteInfo2NextHopEntry(struct rfapi_ip_prefix *rprefix,
 				       __func__, __LINE__, have_vnc_tunnel_un);
 #endif
 
-		if (!have_vnc_tunnel_un && bi && bi->extra) {
+		if (!have_vnc_tunnel_un && bi->extra) {
 			/*
 			 * use cached UN address from ENCAP route
 			 */
@@ -3532,7 +3530,10 @@ void rfapiBgpInfoFilteredImportVPN(
 			 * Compare types. Doing so prevents a RFP-originated
 			 * route from matching an imported route, for example.
 			 */
-			assert(bi->type == type);
+			if (VNC_DEBUG(VERBOSE) && bi->type != type)
+				/* should be handled by RDs, but warn for now */
+				zlog_warn("%s: type mismatch! (bi=%d, arg=%d)",
+					  __func__, bi->type, type);
 
 			vnc_zlog_debug_verbose("%s: found matching bi",
 					       __func__);
@@ -3863,6 +3864,20 @@ void rfapiBgpInfoFilteredImportVPN(
 	VNC_ITRCCK;
 }
 
+static void rfapiBgpInfoFilteredImportBadSafi(
+	struct rfapi_import_table *import_table, int action, struct peer *peer,
+	void *rfd, /* set for looped back routes */
+	struct prefix *p,
+	struct prefix *aux_prefix, /* AFI_L2VPN: optional IP */
+	afi_t afi, struct prefix_rd *prd,
+	struct attr *attr, /* part of bgp_info */
+	u_char type,       /* part of bgp_info */
+	u_char sub_type,   /* part of bgp_info */
+	uint32_t *label)   /* part of bgp_info */
+{
+	vnc_zlog_debug_verbose("%s: Error, bad safi", __func__);
+}
+
 static rfapi_bi_filtered_import_f *
 rfapiBgpInfoFilteredImportFunction(safi_t safi)
 {
@@ -3875,10 +3890,9 @@ rfapiBgpInfoFilteredImportFunction(safi_t safi)
 
 	default:
 		/* not expected */
-		return NULL;
+		zlog_err("%s: bad safi %d", __func__, safi);
+		return rfapiBgpInfoFilteredImportBadSafi;
 	}
-	zlog_err("%s: bad safi %d", __func__, safi);
-	return NULL;
 }
 
 void rfapiProcessUpdate(struct peer *peer,
@@ -3933,7 +3947,7 @@ void rfapiProcessUpdate(struct peer *peer,
 		vnc_zlog_debug_verbose(
 			"%s: rfapiEcommunityGetLNI returned %d, lni=%d, attr=%p",
 			__func__, rc, lni, attr);
-		if (attr && !rc) {
+		if (!rc) {
 			it = rfapiMacImportTableGet(bgp, lni);
 
 			rfapiBgpInfoFilteredImportVPN(
@@ -3959,9 +3973,6 @@ void rfapiProcessUpdate(struct peer *peer,
 
 	if (safi == SAFI_MPLS_VPN) {
 		vnc_direct_bgp_rh_add_route(bgp, afi, p, peer, attr);
-	}
-
-	if (safi == SAFI_MPLS_VPN) {
 		rfapiBgpInfoFilteredImportVPN(
 			bgp->rfapi->it_ce, FIF_ACTION_UPDATE, peer, rfd,
 			p, /* prefix */

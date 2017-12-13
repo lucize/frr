@@ -1271,7 +1271,6 @@ void bgp_open_capability(struct stream *s, struct peer *peer)
 	as_t local_as;
 	u_int32_t restart_time;
 	u_char afi_safi_count = 0;
-	struct utsname names;
 	int adv_addpath_tx = 0;
 
 	/* Remember current pointer for Opt Parm Len. */
@@ -1286,59 +1285,52 @@ void bgp_open_capability(struct stream *s, struct peer *peer)
 		return;
 
 	/* MP capability for configured AFI, SAFI */
-	for (afi = AFI_IP; afi < AFI_MAX; afi++)
-		for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++) {
-			if (peer->afc[afi][safi]) {
-				/* Convert AFI, SAFI to values for packet. */
-				bgp_map_afi_safi_int2iana(afi, safi, &pkt_afi,
-							  &pkt_safi);
+	FOREACH_AFI_SAFI (afi, safi) {
+		if (peer->afc[afi][safi]) {
+			/* Convert AFI, SAFI to values for packet. */
+			bgp_map_afi_safi_int2iana(afi, safi, &pkt_afi,
+						  &pkt_safi);
 
-				peer->afc_adv[afi][safi] = 1;
-				stream_putc(s, BGP_OPEN_OPT_CAP);
-				stream_putc(s, CAPABILITY_CODE_MP_LEN + 2);
-				stream_putc(s, CAPABILITY_CODE_MP);
-				stream_putc(s, CAPABILITY_CODE_MP_LEN);
-				stream_putw(s, pkt_afi);
-				stream_putc(s, 0);
-				stream_putc(s, pkt_safi);
+			peer->afc_adv[afi][safi] = 1;
+			stream_putc(s, BGP_OPEN_OPT_CAP);
+			stream_putc(s, CAPABILITY_CODE_MP_LEN + 2);
+			stream_putc(s, CAPABILITY_CODE_MP);
+			stream_putc(s, CAPABILITY_CODE_MP_LEN);
+			stream_putw(s, pkt_afi);
+			stream_putc(s, 0);
+			stream_putc(s, pkt_safi);
 
-				/* Extended nexthop capability - currently
-				 * supporting RFC-5549 for
-				 * Link-Local peering only
+			/* Extended nexthop capability - currently
+			 * supporting RFC-5549 for
+			 * Link-Local peering only
+			 */
+			if (CHECK_FLAG(peer->flags, PEER_FLAG_CAPABILITY_ENHE)
+			    && peer->su.sa.sa_family == AF_INET6
+			    && IN6_IS_ADDR_LINKLOCAL(&peer->su.sin6.sin6_addr)
+			    && afi == AFI_IP
+			    && (safi == SAFI_UNICAST
+				|| safi == SAFI_LABELED_UNICAST)) {
+				/* RFC 5549 Extended Next Hop Encoding
 				 */
-				if (CHECK_FLAG(peer->flags,
-					       PEER_FLAG_CAPABILITY_ENHE)
-				    && peer->su.sa.sa_family == AF_INET6
-				    && IN6_IS_ADDR_LINKLOCAL(
-					       &peer->su.sin6.sin6_addr)
-				    && afi == AFI_IP
-				    && (safi == SAFI_UNICAST
-					|| safi == SAFI_LABELED_UNICAST)) {
-					/* RFC 5549 Extended Next Hop Encoding
-					 */
-					SET_FLAG(peer->cap, PEER_CAP_ENHE_ADV);
-					stream_putc(s, BGP_OPEN_OPT_CAP);
-					stream_putc(s,
-						    CAPABILITY_CODE_ENHE_LEN
-							    + 2);
-					stream_putc(s, CAPABILITY_CODE_ENHE);
-					stream_putc(s,
-						    CAPABILITY_CODE_ENHE_LEN);
+				SET_FLAG(peer->cap, PEER_CAP_ENHE_ADV);
+				stream_putc(s, BGP_OPEN_OPT_CAP);
+				stream_putc(s, CAPABILITY_CODE_ENHE_LEN + 2);
+				stream_putc(s, CAPABILITY_CODE_ENHE);
+				stream_putc(s, CAPABILITY_CODE_ENHE_LEN);
 
-					SET_FLAG(peer->af_cap[AFI_IP][safi],
-						 PEER_CAP_ENHE_AF_ADV);
-					stream_putw(s, pkt_afi);
-					stream_putw(s, pkt_safi);
-					stream_putw(s, afi_int2iana(AFI_IP6));
+				SET_FLAG(peer->af_cap[AFI_IP][safi],
+					 PEER_CAP_ENHE_AF_ADV);
+				stream_putw(s, pkt_afi);
+				stream_putw(s, pkt_safi);
+				stream_putw(s, afi_int2iana(AFI_IP6));
 
-					if (CHECK_FLAG(peer->af_cap[afi][safi],
-						       PEER_CAP_ENHE_AF_RCV))
-						SET_FLAG(
-							peer->af_cap[afi][safi],
-							PEER_CAP_ENHE_AF_NEGO);
-				}
+				if (CHECK_FLAG(peer->af_cap[afi][safi],
+					       PEER_CAP_ENHE_AF_RCV))
+					SET_FLAG(peer->af_cap[afi][safi],
+						 PEER_CAP_ENHE_AF_NEGO);
 			}
 		}
+	}
 
 	/* Route refresh. */
 	SET_FLAG(peer->cap, PEER_CAP_REFRESH_ADV);
@@ -1364,21 +1356,20 @@ void bgp_open_capability(struct stream *s, struct peer *peer)
 	stream_putl(s, local_as);
 
 	/* AddPath */
-	for (afi = AFI_IP; afi < AFI_MAX; afi++)
-		for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++)
-			if (peer->afc[afi][safi]) {
-				afi_safi_count++;
+	FOREACH_AFI_SAFI (afi, safi) {
+		if (peer->afc[afi][safi]) {
+			afi_safi_count++;
 
-				/* Only advertise addpath TX if a feature that
-				 * will use it is
-				 * configured */
-				if (CHECK_FLAG(peer->af_flags[afi][safi],
-					       PEER_FLAG_ADDPATH_TX_ALL_PATHS)
-				    || CHECK_FLAG(
-					       peer->af_flags[afi][safi],
-					       PEER_FLAG_ADDPATH_TX_BESTPATH_PER_AS))
-					adv_addpath_tx = 1;
-			}
+			/* Only advertise addpath TX if a feature that
+			 * will use it is
+			 * configured */
+			if (CHECK_FLAG(peer->af_flags[afi][safi],
+				       PEER_FLAG_ADDPATH_TX_ALL_PATHS)
+			    || CHECK_FLAG(peer->af_flags[afi][safi],
+					  PEER_FLAG_ADDPATH_TX_BESTPATH_PER_AS))
+				adv_addpath_tx = 1;
+		}
+	}
 
 	SET_FLAG(peer->cap, PEER_CAP_ADDPATH_ADV);
 	stream_putc(s, BGP_OPEN_OPT_CAP);
@@ -1386,46 +1377,43 @@ void bgp_open_capability(struct stream *s, struct peer *peer)
 	stream_putc(s, CAPABILITY_CODE_ADDPATH);
 	stream_putc(s, CAPABILITY_CODE_ADDPATH_LEN * afi_safi_count);
 
-	for (afi = AFI_IP; afi < AFI_MAX; afi++)
-		for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++)
-			if (peer->afc[afi][safi]) {
-				/* Convert AFI, SAFI to values for packet. */
-				bgp_map_afi_safi_int2iana(afi, safi, &pkt_afi,
-							  &pkt_safi);
+	FOREACH_AFI_SAFI (afi, safi) {
+		if (peer->afc[afi][safi]) {
+			/* Convert AFI, SAFI to values for packet. */
+			bgp_map_afi_safi_int2iana(afi, safi, &pkt_afi,
+						  &pkt_safi);
 
-				stream_putw(s, pkt_afi);
-				stream_putc(s, pkt_safi);
+			stream_putw(s, pkt_afi);
+			stream_putc(s, pkt_safi);
 
-				if (adv_addpath_tx) {
-					stream_putc(s,
-						    BGP_ADDPATH_RX
-							    | BGP_ADDPATH_TX);
-					SET_FLAG(peer->af_cap[afi][safi],
-						 PEER_CAP_ADDPATH_AF_RX_ADV);
-					SET_FLAG(peer->af_cap[afi][safi],
-						 PEER_CAP_ADDPATH_AF_TX_ADV);
-				} else {
-					stream_putc(s, BGP_ADDPATH_RX);
-					SET_FLAG(peer->af_cap[afi][safi],
-						 PEER_CAP_ADDPATH_AF_RX_ADV);
-					UNSET_FLAG(peer->af_cap[afi][safi],
-						   PEER_CAP_ADDPATH_AF_TX_ADV);
-				}
+			if (adv_addpath_tx) {
+				stream_putc(s, BGP_ADDPATH_RX | BGP_ADDPATH_TX);
+				SET_FLAG(peer->af_cap[afi][safi],
+					 PEER_CAP_ADDPATH_AF_RX_ADV);
+				SET_FLAG(peer->af_cap[afi][safi],
+					 PEER_CAP_ADDPATH_AF_TX_ADV);
+			} else {
+				stream_putc(s, BGP_ADDPATH_RX);
+				SET_FLAG(peer->af_cap[afi][safi],
+					 PEER_CAP_ADDPATH_AF_RX_ADV);
+				UNSET_FLAG(peer->af_cap[afi][safi],
+					   PEER_CAP_ADDPATH_AF_TX_ADV);
 			}
+		}
+	}
 
 	/* ORF capability. */
-	for (afi = AFI_IP; afi < AFI_MAX; afi++)
-		for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++)
-			if (CHECK_FLAG(peer->af_flags[afi][safi],
-				       PEER_FLAG_ORF_PREFIX_SM)
-			    || CHECK_FLAG(peer->af_flags[afi][safi],
-					  PEER_FLAG_ORF_PREFIX_RM)) {
-				bgp_open_capability_orf(
-					s, peer, afi, safi,
-					CAPABILITY_CODE_ORF_OLD);
-				bgp_open_capability_orf(s, peer, afi, safi,
-							CAPABILITY_CODE_ORF);
-			}
+	FOREACH_AFI_SAFI (afi, safi) {
+		if (CHECK_FLAG(peer->af_flags[afi][safi],
+			       PEER_FLAG_ORF_PREFIX_SM)
+		    || CHECK_FLAG(peer->af_flags[afi][safi],
+				  PEER_FLAG_ORF_PREFIX_RM)) {
+			bgp_open_capability_orf(s, peer, afi, safi,
+						CAPABILITY_CODE_ORF_OLD);
+			bgp_open_capability_orf(s, peer, afi, safi,
+						CAPABILITY_CODE_ORF);
+		}
+	}
 
 	/* Dynamic capability. */
 	if (CHECK_FLAG(peer->flags, PEER_FLAG_DYNAMIC_CAPABILITY)) {
@@ -1441,8 +1429,7 @@ void bgp_open_capability(struct stream *s, struct peer *peer)
 	}
 
 	/* Hostname capability */
-	uname(&names);
-	if (names.nodename[0] != '\0') {
+	if (cmd_hostname_get()) {
 		SET_FLAG(peer->cap, PEER_CAP_HOSTNAME_ADV);
 		stream_putc(s, BGP_OPEN_OPT_CAP);
 		rcapp = stream_get_endp(s); /* Ptr to length placeholder */
@@ -1450,26 +1437,21 @@ void bgp_open_capability(struct stream *s, struct peer *peer)
 		stream_putc(s, CAPABILITY_CODE_FQDN);
 		capp = stream_get_endp(s);
 		stream_putc(s, 0); /* dummy len for now */
-		len = strlen(names.nodename);
+		len = strlen(cmd_hostname_get());
 		if (len > BGP_MAX_HOSTNAME)
 			len = BGP_MAX_HOSTNAME;
 
 		stream_putc(s, len);
-		stream_put(s, names.nodename, len);
-#ifdef HAVE_STRUCT_UTSNAME_DOMAINNAME
-		if ((names.domainname[0] != '\0')
-		    && (strcmp(names.domainname, "(none)") != 0)) {
-			len = strlen(names.domainname);
+		stream_put(s, cmd_hostname_get(), len);
+		if (cmd_domainname_get()) {
+			len = strlen(cmd_domainname_get());
 			if (len > BGP_MAX_HOSTNAME)
 				len = BGP_MAX_HOSTNAME;
 
 			stream_putc(s, len);
-			stream_put(s, names.domainname, len);
+			stream_put(s, cmd_domainname_get(), len);
 		} else
-#endif
-		{
 			stream_putc(s, 0); /* 0 length */
-		}
 
 		/* Set the lengths straight */
 		len = stream_get_endp(s) - rcapp - 1;
@@ -1478,14 +1460,10 @@ void bgp_open_capability(struct stream *s, struct peer *peer)
 		stream_putc_at(s, capp, len);
 
 		if (bgp_debug_neighbor_events(peer))
-#ifdef HAVE_STRUCT_UTSNAME_DOMAINNAME
 			zlog_debug(
 				"%s Sending hostname cap with hn = %s, dn = %s",
-				peer->host, names.nodename, names.domainname);
-#else
-			zlog_debug("%s Sending hostname cap with hn = %s",
-				   peer->host, names.nodename);
-#endif
+				peer->host, cmd_hostname_get(),
+				cmd_domainname_get());
 	}
 
 	/* Sending base graceful-restart capability irrespective of the config
@@ -1508,22 +1486,21 @@ void bgp_open_capability(struct stream *s, struct peer *peer)
 	   config
 	   is present */
 	if (bgp_flag_check(peer->bgp, BGP_FLAG_GRACEFUL_RESTART)) {
-		for (afi = AFI_IP; afi < AFI_MAX; afi++)
-			for (safi = SAFI_UNICAST; safi < SAFI_MAX; safi++)
-				if (peer->afc[afi][safi]) {
-					/* Convert AFI, SAFI to values for
-					 * packet. */
-					bgp_map_afi_safi_int2iana(
-						afi, safi, &pkt_afi, &pkt_safi);
-					stream_putw(s, pkt_afi);
-					stream_putc(s, pkt_safi);
-					if (bgp_flag_check(
-						    peer->bgp,
-						    BGP_FLAG_GR_PRESERVE_FWD))
-						stream_putc(s, RESTART_F_BIT);
-					else
-						stream_putc(s, 0);
-				}
+		FOREACH_AFI_SAFI (afi, safi) {
+			if (peer->afc[afi][safi]) {
+				/* Convert AFI, SAFI to values for
+				 * packet. */
+				bgp_map_afi_safi_int2iana(afi, safi, &pkt_afi,
+							  &pkt_safi);
+				stream_putw(s, pkt_afi);
+				stream_putc(s, pkt_safi);
+				if (bgp_flag_check(peer->bgp,
+						   BGP_FLAG_GR_PRESERVE_FWD))
+					stream_putc(s, RESTART_F_BIT);
+				else
+					stream_putc(s, 0);
+			}
+		}
 	}
 
 	/* Total Graceful restart capability Len. */

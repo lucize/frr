@@ -37,21 +37,19 @@ DECLARE_MGROUP(MVTYSH)
 #define VTYSH_NHRPD  0x800
 #define VTYSH_EIGRPD 0x1000
 #define VTYSH_BABELD 0x2000
+#define VTYSH_SHARPD 0x4000
+
 
 /* commands in REALLYALL are crucial to correct vtysh operation */
 #define VTYSH_REALLYALL	  ~0U
 /* watchfrr is not in ALL since library CLI functions should not be
  * run on it (logging & co. should stay in a fixed/frozen config, and
  * things like prefix lists are not even initialised) */
-#define VTYSH_ALL	  VTYSH_ZEBRA|VTYSH_RIPD|VTYSH_RIPNGD|VTYSH_OSPFD|VTYSH_OSPF6D|VTYSH_LDPD|VTYSH_BGPD|VTYSH_ISISD|VTYSH_PIMD|VTYSH_NHRPD|VTYSH_EIGRPD|VTYSH_BABELD
+#define VTYSH_ALL	  VTYSH_ZEBRA|VTYSH_RIPD|VTYSH_RIPNGD|VTYSH_OSPFD|VTYSH_OSPF6D|VTYSH_LDPD|VTYSH_BGPD|VTYSH_ISISD|VTYSH_PIMD|VTYSH_NHRPD|VTYSH_EIGRPD|VTYSH_BABELD|VTYSH_SHARPD
 #define VTYSH_RMAP	  VTYSH_ZEBRA|VTYSH_RIPD|VTYSH_RIPNGD|VTYSH_OSPFD|VTYSH_OSPF6D|VTYSH_BGPD|VTYSH_PIMD|VTYSH_EIGRPD
 #define VTYSH_INTERFACE	  VTYSH_ZEBRA|VTYSH_RIPD|VTYSH_RIPNGD|VTYSH_OSPFD|VTYSH_OSPF6D|VTYSH_ISISD|VTYSH_PIMD|VTYSH_NHRPD|VTYSH_EIGRPD|VTYSH_BABELD
 #define VTYSH_NS          VTYSH_ZEBRA
 #define VTYSH_VRF	  VTYSH_ZEBRA|VTYSH_PIMD
-
-/* vtysh local configuration file. */
-#define VTYSH_DEFAULT_CONFIG "vtysh.conf"
-#define FRR_DEFAULT_CONFIG "frr.conf"
 
 enum vtysh_write_integrated {
 	WRITE_INTEGRATED_UNSPECIFIED,
@@ -61,7 +59,8 @@ enum vtysh_write_integrated {
 
 extern enum vtysh_write_integrated vtysh_write_integrated;
 
-extern char *quagga_config;
+extern char frr_config[];
+extern char vtydir[];
 
 void vtysh_init_vty(void);
 void vtysh_init_cmd(void);
@@ -93,11 +92,12 @@ void vtysh_config_init(void);
 
 void vtysh_pager_init(void);
 
+void suid_on(void);
+void suid_off(void);
+
 /* Child process execution flag. */
 extern int execute_flag;
 
 extern struct vty *vty;
-
-extern const char *vty_sock_path;
 
 #endif /* VTYSH_H */

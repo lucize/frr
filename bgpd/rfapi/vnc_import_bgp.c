@@ -573,7 +573,7 @@ static void vnc_import_bgp_add_route_mode_resolve_nve(
 	struct bgp_node *bnp; /* prd table node */
 
 	/*debugging */
-	{
+	if (VNC_DEBUG(VERBOSE)) {
 		char str_pfx[BUFSIZ];
 		char str_nh[BUFSIZ];
 		struct prefix nh;
@@ -1183,7 +1183,8 @@ static void vnc_import_bgp_del_route_mode_nvegroup(struct bgp *bgp,
 
 	assert(afi);
 
-	assert((rfg = bgp->rfapi_cfg->rfg_redist));
+	rfg = bgp->rfapi_cfg->rfg_redist;
+	assert(rfg);
 
 	/*
 	 * Compute VN address
@@ -1450,7 +1451,7 @@ void vnc_import_bgp_add_vnc_host_route_mode_resolve_nve(
 		return;
 	}
 
-	if (bgp && bgp->rfapi)
+	if (bgp->rfapi)
 		sl = bgp->rfapi->resolve_nve_nexthop;
 
 	if (!sl) {
@@ -1597,7 +1598,7 @@ void vnc_import_bgp_del_vnc_host_route_mode_resolve_nve(
 		return;
 	}
 
-	if (bgp && bgp->rfapi)
+	if (bgp->rfapi)
 		sl = bgp->rfapi->resolve_nve_nexthop;
 
 	if (!sl) {
@@ -2426,7 +2427,7 @@ void vnc_import_bgp_exterior_add_route_interior(
 			skiplist_delete(it->monitor_exterior_orphans,
 					bi_exterior, NULL);
 		}
-		list_delete(list_adopted);
+		list_delete_and_null(&list_adopted);
 	}
 }
 
@@ -2637,7 +2638,7 @@ void vnc_import_bgp_add_route(struct bgp *bgp, struct prefix *prefix,
 {
 	afi_t afi = family2afi(prefix->family);
 
-	{
+	if (VNC_DEBUG(VERBOSE)) {
 		struct prefix pfx_nexthop;
 		char buf[BUFSIZ];
 		char buf_nh[BUFSIZ];

@@ -52,7 +52,7 @@ info_TEXINFOS = frr.texi
 # because it cant just work from the png's directly it seems - contrary
 # to the documentation...
 frr.pdf: $(info_TEXINFOS) $(figures_pdf) $(frr_TEXINFOS) defines.texi
-	$(TEXI2PDF) -o "$@" $<
+	$(TEXI2PDF) -o "$@" $< || true
 
 # don't ask me why the info file is in srcdir
 $(srcdir)/frr.info: $(frr_TEXINFOS) defines.texi
@@ -68,7 +68,8 @@ frr_TEXINFOS = appendix.texi basic.texi bgpd.texi isisd.texi filter.texi \
 	ospf6d.texi ospfd.texi \
 	overview.texi protocol.texi ripd.texi ripngd.texi routemap.texi \
 	snmp.texi vtysh.texi routeserver.texi $(figures_png) \
-	snmptrap.texi ospf_fundamentals.texi isisd.texi $(figures_txt)
+	snmptrap.texi ospf_fundamentals.texi isisd.texi $(figures_txt) \
+	rpki.texi
 
 .png.eps:
 	$(PNGTOEPS) $< "$@"
@@ -79,7 +80,7 @@ frr_TEXINFOS = appendix.texi basic.texi bgpd.texi isisd.texi filter.texi \
 .dia.png:
 	$(DIATOPNG) "$@" $<
 
-man_MANS = frr.1
+man_MANS = frr.1 frr-args.8
 
 if PIMD
 man_MANS += pimd.8

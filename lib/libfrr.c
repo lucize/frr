@@ -37,6 +37,8 @@
 #include "network.h"
 
 DEFINE_HOOK(frr_late_init, (struct thread_master * tm), (tm))
+DEFINE_KOOH(frr_early_fini, (), ())
+DEFINE_KOOH(frr_fini, (), ())
 
 const char frr_sysconfdir[] = SYSCONFDIR;
 const char frr_vtydir[] = DAEMON_VTY_DIR;
@@ -49,6 +51,8 @@ char config_default[256];
 char frr_zclientpath[256];
 static char pidfile_default[256];
 static char vtypath_default[256];
+
+bool debug_memstats_at_exit = 0;
 
 static char comb_optstr[256];
 static struct option comb_lo[64];
@@ -97,13 +101,15 @@ static const struct optspec os_always = {
 static const struct option lo_cfg_pid_dry[] = {
 	{"pid_file", required_argument, NULL, 'i'},
 	{"config_file", required_argument, NULL, 'f'},
+	{"pathspace", required_argument, NULL, 'N'},
 	{"dryrun", no_argument, NULL, 'C'},
 	{"terminal", no_argument, NULL, 't'},
 	{NULL}};
 static const struct optspec os_cfg_pid_dry = {
-	"f:i:Ct",
+	"f:i:CtN:",
 	"  -f, --config_file  Set configuration file name\n"
 	"  -i, --pid_file     Set process identifier file name\n"
+	"  -N, --pathspace    Insert prefix into config & socket paths\n"
 	"  -C, --dryrun       Check configuration for validity and exit\n"
 	"  -t, --terminal     Open terminal session on stdio\n"
 	"  -d -t              Daemonize after terminal session ends\n",
@@ -347,6 +353,23 @@ static int frr_opt(int opt)
 			return 1;
 		di->config_file = optarg;
 		break;
+	case 'N':
+		if (di->flags & FRR_NO_CFG_PID_DRY)
+			return 1;
+		if (di->pathspace) {
+			fprintf(stderr,
+				"-N/--pathspace option specified more than once!\n");
+			errors++;
+			break;
+		}
+		if (strchr(optarg, '/') || strchr(optarg, '.')) {
+			fprintf(stderr,
+				"slashes or dots are not permitted in the --pathspace option.\n");
+			errors++;
+			break;
+		}
+		di->pathspace = optarg;
+		break;
 	case 'C':
 		if (di->flags & FRR_NO_CFG_PID_DRY)
 			return 1;
@@ -496,14 +519,25 @@ struct thread_master *frr_init(void)
 	struct option_chain *oc;
 	struct frrmod_runtime *module;
 	char moderr[256];
+	char p_instance[16] = "", p_pathspace[256] = "";
 	const char *dir;
 	dir = di->module_path ? di->module_path : frr_moduledir;
 
 	srandom(time(NULL));
 
-	if (di->instance)
+	if (di->instance) {
 		snprintf(frr_protonameinst, sizeof(frr_protonameinst), "%s[%u]",
 			 di->logname, di->instance);
+		snprintf(p_instance, sizeof(p_instance), "-%d", di->instance);
+	}
+	if (di->pathspace)
+		snprintf(p_pathspace, sizeof(p_pathspace), "/%s",
+			 di->pathspace);
+
+	snprintf(config_default, sizeof(config_default), "%s%s%s%s.conf",
+		 frr_sysconfdir, p_pathspace, di->name, p_instance);
+	snprintf(pidfile_default, sizeof(pidfile_default), "%s%s/%s%s.pid",
+		 frr_vtydir, p_pathspace, di->name, p_instance);
 
 	zprivs_preinit(di->privs);
 
@@ -637,7 +671,10 @@ static void frr_daemon_wait(int fd)
 		exit(0);
 
 	/* child failed one way or another ... */
-	if (WIFEXITED(exitstat))
+	if (WIFEXITED(exitstat) && WEXITSTATUS(exitstat) == 0)
+		/* can happen in --terminal case if exit is fast enough */
+		(void)0;
+	else if (WIFEXITED(exitstat))
 		fprintf(stderr, "%s failed to start, exited %d\n", di->name,
 			WEXITSTATUS(exitstat));
 	else if (WIFSIGNALED(exitstat))
@@ -688,14 +725,6 @@ void frr_config_fork(void)
 {
 	hook_call(frr_late_init, master);
 
-	if (di->instance) {
-		snprintf(config_default, sizeof(config_default),
-			 "%s/%s-%d.conf", frr_sysconfdir, di->name,
-			 di->instance);
-		snprintf(pidfile_default, sizeof(pidfile_default),
-			 "%s/%s-%d.pid", frr_vtydir, di->name, di->instance);
-	}
-
 	vty_read_config(di->config_file, config_default);
 
 	/* Don't start execution if we are in dry-run mode */
@@ -716,7 +745,13 @@ void frr_vty_serv(void)
 	 * (not currently set anywhere) */
 	if (!di->vty_path) {
 		const char *dir;
-		dir = di->vty_sock_path ? di->vty_sock_path : frr_vtydir;
+		char defvtydir[256];
+
+		snprintf(defvtydir, sizeof(defvtydir), "%s%s%s", frr_vtydir,
+			 di->pathspace ? "/" : "",
+			 di->pathspace ? di->pathspace : "");
+
+		dir = di->vty_sock_path ? di->vty_sock_path : defvtydir;
 
 		if (di->instance)
 			snprintf(vtypath_default, sizeof(vtypath_default),
@@ -733,6 +768,8 @@ void frr_vty_serv(void)
 
 static void frr_terminal_close(int isexit)
 {
+	int nullfd;
+
 	if (daemon_ctl_sock != -1) {
 		close(daemon_ctl_sock);
 		daemon_ctl_sock = -1;
@@ -748,11 +785,16 @@ static void frr_terminal_close(int isexit)
 		fflush(stdout);
 	}
 
-	int nullfd = open("/dev/null", O_RDONLY | O_NOCTTY);
-	dup2(nullfd, 0);
-	dup2(nullfd, 1);
-	dup2(nullfd, 2);
-	close(nullfd);
+	nullfd = open("/dev/null", O_RDONLY | O_NOCTTY);
+	if (nullfd == -1) {
+		zlog_err("%s: failed to open /dev/null: %s", __func__,
+			 safe_strerror(errno));
+	} else {
+		dup2(nullfd, 0);
+		dup2(nullfd, 1);
+		dup2(nullfd, 2);
+		close(nullfd);
+	}
 }
 
 static struct thread *daemon_ctl_thread = NULL;
@@ -814,10 +856,15 @@ void frr_run(struct thread_master *master)
 		}
 	} else if (di->daemon_mode) {
 		int nullfd = open("/dev/null", O_RDONLY | O_NOCTTY);
-		dup2(nullfd, 0);
-		dup2(nullfd, 1);
-		dup2(nullfd, 2);
-		close(nullfd);
+		if (nullfd == -1) {
+			zlog_err("%s: failed to open /dev/null: %s", __func__,
+				 safe_strerror(errno));
+		} else {
+			dup2(nullfd, 0);
+			dup2(nullfd, 1);
+			dup2(nullfd, 2);
+			close(nullfd);
+		}
 
 		if (daemon_ctl_sock != -1)
 			close(daemon_ctl_sock);
@@ -830,4 +877,52 @@ void frr_run(struct thread_master *master)
 	struct thread thread;
 	while (thread_fetch(master, &thread))
 		thread_call(&thread);
+}
+
+void frr_early_fini(void)
+{
+	hook_call(frr_early_fini);
+}
+
+void frr_fini(void)
+{
+	FILE *fp;
+	char filename[128];
+	int have_leftovers;
+
+	hook_call(frr_fini);
+
+	/* memory_init -> nothing needed */
+	vty_terminate();
+	cmd_terminate();
+	zprivs_terminate(di->privs);
+	/* signal_init -> nothing needed */
+	thread_master_free(master);
+	master = NULL;
+	closezlog();
+	/* frrmod_init -> nothing needed / hooks */
+
+	if (!debug_memstats_at_exit)
+		return;
+
+	have_leftovers = log_memstats(stderr, di->name);
+
+	/* in case we decide at runtime that we want exit-memstats for
+	 * a daemon, but it has no stderr because it's daemonized
+	 * (only do this if we actually have something to print though)
+	 */
+	if (!have_leftovers)
+		return;
+
+	snprintf(filename, sizeof(filename),
+		 "/tmp/frr-memstats-%s-%llu-%llu",
+		 di->name,
+		 (unsigned long long)getpid(),
+		 (unsigned long long)time(NULL));
+
+	fp = fopen(filename, "w");
+	if (fp) {
+		log_memstats(fp, di->name);
+		fclose(fp);
+	}
 }

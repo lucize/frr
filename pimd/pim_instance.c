@@ -48,7 +48,7 @@ static void pim_instance_terminate(struct pim_instance *pim)
 	}
 
 	if (pim->static_routes)
-		list_delete(pim->static_routes);
+		list_delete_and_null(&pim->static_routes);
 
 	pim_rp_free(pim);
 
@@ -192,14 +192,18 @@ static int pim_vrf_config_write(struct vty *vty)
 	struct vrf *vrf;
 	struct pim_instance *pim;
 
-	RB_FOREACH(vrf, vrf_name_head, &vrfs_by_name)
-	{
+	RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
 		pim = vrf->info;
-		if (!pim || vrf->vrf_id != VRF_DEFAULT) {
-			vty_out(vty, "vrf %s\n", vrf->name);
-			pim_global_config_write_worker(pim, vty);
-			vty_out(vty, "!\n");
-		}
+
+		if (!pim)
+			continue;
+
+		if (vrf->vrf_id == VRF_DEFAULT)
+			continue;
+
+		vty_frame(vty, "vrf %s\n", vrf->name);
+		pim_global_config_write_worker(pim, vty);
+		vty_endframe(vty, "!\n");
 	}
 
 	return 0;

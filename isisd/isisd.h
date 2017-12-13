@@ -25,8 +25,6 @@
 
 #include "vty.h"
 
-#define ISISD_VERSION "0.0.7"
-
 #include "isisd/isis_constants.h"
 #include "isisd/isis_common.h"
 #include "isisd/isis_redist.h"
@@ -34,6 +32,8 @@
 #include "dict.h"
 #include "isis_memory.h"
 #include "qobj.h"
+
+extern struct zebra_privs_t isisd_privs;
 
 /* uncomment if you are a developer in bug hunt */
 /* #define EXTREME_DEBUG  */
@@ -52,7 +52,8 @@ struct isis {
 	struct area_addr *man_area_addrs; /* manualAreaAddresses */
 	u_int32_t debugs;		  /* bitmap for debug */
 	time_t uptime;			  /* when did we start */
-	struct thread *t_dync_clean; /* dynamic hostname cache cleanup thread */
+	struct thread *t_dync_clean;      /* dynamic hostname cache cleanup thread */
+	uint32_t circuit_ids_used[8];     /* 256 bits to track circuit ids 0 through 255 */
 
 	struct route_table *ext_info[REDIST_PROTOCOL_COUNT];
 

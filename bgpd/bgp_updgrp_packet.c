@@ -374,8 +374,7 @@ void bpacket_queue_show_vty(struct bpacket_queue *q, struct vty *vty)
 		vty_out(vty, "  Packet %p ver %u buffer %p\n", pkt, pkt->ver,
 			pkt->buffer);
 
-		LIST_FOREACH(paf, &(pkt->peers), pkt_train)
-		{
+		LIST_FOREACH (paf, &(pkt->peers), pkt_train) {
 			vty_out(vty, "      - %s\n", paf->peer->host);
 		}
 		pkt = bpacket_next(pkt);
@@ -634,7 +633,6 @@ struct stream *bpacket_reformat_for_peer(struct bpacket *pkt,
 		}
 	}
 
-	bgp_packet_add(peer, s);
 	return s;
 }
 
@@ -964,7 +962,7 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 		addpath_tx_id = adj->addpath_tx_id;
 
 		space_remaining =
-			STREAM_REMAIN(s) - BGP_MAX_PACKET_SIZE_OVERFLOW;
+			STREAM_WRITEABLE(s) - BGP_MAX_PACKET_SIZE_OVERFLOW;
 		space_needed =
 			BGP_NLRI_LENGTH + addpath_overhead + BGP_TOTAL_ATTR_LEN
 			+ bgp_packet_mpattr_prefix_size(afi, safi, &rn->p);
@@ -1091,10 +1089,9 @@ void subgroup_default_update_packet(struct update_subgroup *subgrp,
 	bpacket_attr_vec_arr_reset(&vecarr);
 	addpath_encode = bgp_addpath_encode_tx(peer, afi, safi);
 
-	if (afi == AFI_IP)
-		str2prefix("0.0.0.0/0", &p);
-	else
-		str2prefix("::/0", &p);
+	memset(&p, 0, sizeof(p));
+	p.family = afi2family(afi);
+	p.prefixlen = 0;
 
 	/* Logging the attribute. */
 	if (bgp_debug_update(NULL, &p, subgrp->update_group, 0)) {
@@ -1177,10 +1174,9 @@ void subgroup_default_withdraw_packet(struct update_subgroup *subgrp)
 	safi = SUBGRP_SAFI(subgrp);
 	addpath_encode = bgp_addpath_encode_tx(peer, afi, safi);
 
-	if (afi == AFI_IP)
-		str2prefix("0.0.0.0/0", &p);
-	else
-		str2prefix("::/0", &p);
+	memset(&p, 0, sizeof(p));
+	p.family = afi2family(afi);
+	p.prefixlen = 0;
 
 	if (bgp_debug_update(NULL, &p, subgrp->update_group, 0)) {
 		char buf[PREFIX_STRLEN];

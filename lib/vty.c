@@ -91,6 +91,24 @@ char integrate_default[] = SYSCONFDIR INTEGRATE_DEFAULT_CONFIG;
 
 static int do_log_commands = 0;
 
+void vty_frame(struct vty *vty, const char *format, ...)
+{
+	va_list args;
+
+	va_start(args, format);
+	vsnprintf(vty->frame + vty->frame_pos,
+		  sizeof(vty->frame) - vty->frame_pos, format, args);
+	vty->frame_pos = strlen(vty->frame);
+	va_end(args);
+}
+
+void vty_endframe(struct vty *vty, const char *endtext)
+{
+	if (vty->frame_pos == 0 && endtext)
+		vty_out(vty, "%s", endtext);
+	vty->frame_pos = 0;
+}
+
 /* VTY standard output function. */
 int vty_out(struct vty *vty, const char *format, ...)
 {
@@ -99,6 +117,11 @@ int vty_out(struct vty *vty, const char *format, ...)
 	int size = 1024;
 	char buf[1024];
 	char *p = NULL;
+
+	if (vty->frame_pos) {
+		vty->frame_pos = 0;
+		vty_out(vty, "%s", vty->frame);
+	}
 
 	if (vty_shell(vty)) {
 		va_start(args, format);
@@ -250,16 +273,8 @@ void vty_hello(struct vty *vty)
 /* Put out prompt and wait input from user. */
 static void vty_prompt(struct vty *vty)
 {
-	struct utsname names;
-	const char *hostname;
-
 	if (vty->type == VTY_TERM) {
-		hostname = host.name;
-		if (!hostname) {
-			uname(&names);
-			hostname = names.nodename;
-		}
-		vty_out(vty, cmd_prompt(vty->node), hostname);
+		vty_out(vty, cmd_prompt(vty->node), cmd_hostname_get());
 	}
 }
 
@@ -2263,6 +2278,21 @@ static void vty_read_file(FILE *confp)
 			break;
 		case CMD_ERR_NO_MATCH:
 			message = "No such command";
+			break;
+		case CMD_WARNING:
+			message = "Command returned Warning";
+			break;
+		case CMD_WARNING_CONFIG_FAILED:
+			message = "Command returned Warning Config Failed";
+			break;
+		case CMD_ERR_INCOMPLETE:
+			message = "Command returned Incomplete";
+			break;
+		case CMD_ERR_EXEED_ARGC_MAX:
+			message = "Command exceeded maximum number of Arguments";
+			break;
+		default:
+			message = "Command returned unhandled error message";
 			break;
 		}
 

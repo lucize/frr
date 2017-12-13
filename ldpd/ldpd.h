@@ -22,7 +22,7 @@
 #ifndef _LDPD_H_
 #define _LDPD_H_
 
-#include "openbsd-queue.h"
+#include "queue.h"
 #include "openbsd-tree.h"
 #include "imsg.h"
 #include "thread.h"
@@ -409,6 +409,7 @@ struct l2vpn_pw {
 	uint32_t		 pwid;
 	char			 ifname[IF_NAMESIZE];
 	unsigned int		 ifindex;
+	bool			 enabled;
 	uint32_t		 remote_group;
 	uint16_t		 remote_mtu;
 	uint32_t		 local_status;

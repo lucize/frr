@@ -185,16 +185,27 @@ CC="${CC% -std=c99}"
 
 AC_C_FLAG([-std=gnu11], [CC="$ac_cc"], [CC="$CC -std=gnu11"])
 
-dnl if the user specified any CFLAGS, we don't add "-g -Os/-O2" here
-if test "z$orig_cflags" = "z"; then
-  AC_C_FLAG([-g])
-  AC_C_FLAG([-Os], [
-    AC_C_FLAG([-O2])
-  ])
+dnl if the user has specified any CFLAGS, override our settings
+if test "x${enable_dev_build}" = "xyes"; then
+   AC_DEFINE(DEV_BUILD,,Build for development)
+   if test "z$orig_cflags" = "z"; then
+      AC_C_FLAG([-g3])
+      AC_C_FLAG([-O0])
+   fi
+else
+   if test "z$orig_cflags" = "z"; then
+      AC_C_FLAG([-g])
+      AC_C_FLAG([-Os], [
+        AC_C_FLAG([-O2])
+      ])
+   fi
 fi
+AM_CONDITIONAL([DEV_BUILD], [test "x$enable_dev_build" = "xyes"])
+AM_CONDITIONAL([SHARPD], [test "x$enable_dev_build" = "xyes"])
 
 dnl always want these CFLAGS
 AC_C_FLAG([-fno-omit-frame-pointer])
+AC_C_FLAG([-funwind-tables])
 AC_C_FLAG([-Wall])
 AC_C_FLAG([-Wextra])
 AC_C_FLAG([-Wmissing-prototypes])
@@ -320,6 +331,8 @@ AC_ARG_WITH(rfp-path,
   AS_HELP_STRING([--with-rfp-path[=DIR]],[path to replaced stub RFP used with BGP VNC]))
 AC_ARG_ENABLE(snmp,
   AS_HELP_STRING([--enable-snmp=ARG], [enable SNMP support (smux or agentx)]))
+AC_ARG_ENABLE(zeromq,
+  AS_HELP_STRING([--enable-zeromq], [enable ZeroMQ handler (libfrrzmq)]))
 AC_ARG_WITH(libpam,
   AS_HELP_STRING([--with-libpam], [use libpam for PAM support in vtysh]))
 AC_ARG_ENABLE(ospfapi,
@@ -344,7 +357,7 @@ AC_ARG_ENABLE(shell_access,
 AC_ARG_ENABLE(rtadv,
   AS_HELP_STRING([--disable-rtadv], [disable IPV6 router advertisement feature]))
 AC_ARG_ENABLE(irdp,
-  AS_HELP_STRING([--enable-irdp], [enable IRDP server support in zebra]))
+  AS_HELP_STRING([--disable-irdp], [enable IRDP server support in zebra (default if supported)]))
 AC_ARG_ENABLE(capabilities,
   AS_HELP_STRING([--disable-capabilities], [disable using POSIX capabilities]))
 AC_ARG_ENABLE(rusage,
@@ -369,12 +382,16 @@ AC_ARG_ENABLE(cumulus,
   AS_HELP_STRING([--enable-cumulus], [enable Cumulus Switch Special Extensions]))
 AC_ARG_ENABLE(datacenter,
   AS_HELP_STRING([--enable-datacenter], [enable Compilation for Data Center Extensions]))
+AC_ARG_ENABLE(fuzzing,
+  AS_HELP_STRING([--enable-fuzzing], [enable ability to fuzz various parts of FRR]))
 AC_ARG_ENABLE(rr-semantics,
   AS_HELP_STRING([--disable-rr-semantics], [disable the v6 Route Replace semantics]))
 AC_ARG_ENABLE([protobuf],
   AS_HELP_STRING([--enable-protobuf], [Enable experimental protobuf support]))
 AC_ARG_ENABLE([oldvpn_commands],
   AS_HELP_STRING([--enable-oldvpn-commands], [Keep old vpn commands]))
+AC_ARG_ENABLE(rpki,
+  AS_HELP_STRING([--enable-rpki], [enable RPKI prefix validation support]))
 
 AC_CHECK_HEADERS(json-c/json.h)
 AC_CHECK_LIB(json-c, json_object_get, LIBS="$LIBS -ljson-c", [], [-lm])
@@ -420,6 +437,10 @@ else
   DFLT_NAME="traditional"
 fi
 
+if test "${enable_fuzzing}" = "yes" ; then
+  AC_DEFINE(HANDLE_ZAPI_FUZZING,,Compile extensions to use with a fuzzer)
+fi
+
 if test "${enable_cumulus}" = "yes" ; then
   AC_DEFINE(HAVE_CUMULUS,,Compile Special Cumulus Code in)
 fi
@@ -432,11 +453,6 @@ if test "${enable_shell_access}" = "yes"; then
 fi
 
 AM_CONDITIONAL([FPM], [test "x$enable_fpm" = "xyes"])
-
-if test "x${enable_dev_build}" = "xyes"; then
-   AC_DEFINE(DEV_BUILD,,Build for development)
-fi
-AM_CONDITIONAL([DEV_BUILD], [test "x$enable_dev_build" = "xyes"])
 
 #
 # Python for clippy
@@ -568,10 +584,6 @@ if test "${enable_rtadv}" != "no"; then
   AC_DEFINE(HAVE_RTADV,,Enable IPv6 Routing Advertisement support)
 else
   AC_MSG_RESULT(no)
-fi
-
-if test "${enable_irdp}" = "yes"; then
-  AC_DEFINE(HAVE_IRDP,, IRDP )
 fi
 
 if test x"${enable_user}" = x"no"; then
@@ -881,6 +893,7 @@ case "$host_os" in
     AC_DEFINE(KAME,1,KAME IPv6)
     ;;
 esac
+AM_CONDITIONAL(SOLARIS, test "${SOLARIS}" = "solaris")
 
 AC_SYS_LARGEFILE
 
@@ -1298,12 +1311,7 @@ AM_CONDITIONAL(RIPNGD, test "${enable_ripngd}" != "no")
 AM_CONDITIONAL(BABELD, test "${enable_babeld}" != "no")
 AM_CONDITIONAL(OSPF6D, test "${enable_ospf6d}" != "no")
 AM_CONDITIONAL(ISISD, test "${enable_isisd}" != "no")
-
-case "${enable_pimd}" in
-  "no" ) PIMD="";;
-  *    ) PIMD="pimd";;
-esac
-AM_CONDITIONAL(PIMD, test "x$PIMD" = "xpimd")
+AM_CONDITIONAL(PIMD, test "${enable_pimd}" != "no")
 
 if test "${enable_bgp_announce}" = "no";then
   AC_DEFINE(DISABLE_BGP_ANNOUNCE,1,Disable BGP installation to zebra)
@@ -1337,9 +1345,6 @@ AC_SUBST(RFPTEST)
 AC_SUBST(LIBRFP)
 AC_SUBST(RFPINC)
 AC_SUBST(BGPD)
-AC_SUBST(WATCHFRR)
-AC_SUBST(ISISD)
-AC_SUBST(PIMD)
 AC_SUBST(SOLARIS)
 AC_SUBST(VTYSH)
 AC_SUBST(CURSES)
@@ -1370,7 +1375,7 @@ fi
 dnl ------------------
 dnl check Net-SNMP library
 dnl ------------------
-if test "${enable_snmp}" != ""; then
+if test "${enable_snmp}" != "" -a "${enable_snmp}" != "no"; then
    AC_PATH_TOOL([NETSNMP_CONFIG], [net-snmp-config], [no])
    if test x"$NETSNMP_CONFIG" = x"no"; then
       AC_MSG_ERROR([--enable-snmp given but unable to find net-snmp-config])
@@ -1479,17 +1484,27 @@ AC_CHECK_MEMBERS([struct sockaddr.sa_len,
 dnl ---------------------------
 dnl IRDP/pktinfo/icmphdr checks
 dnl ---------------------------
-AC_CHECK_TYPES([struct in_pktinfo], 
- [AC_CHECK_TYPES([struct icmphdr],
-   [if test "${enable_irdp}" != "no"; then
-      AC_DEFINE(HAVE_IRDP,, IRDP)
-    fi],
-   [if test "${enable_irdp}" = "yes"; then
-      AC_MSG_ERROR(['IRDP requires in_pktinfo at the moment!'])
-    fi], [FRR_INCLUDES])],
- [if test "${enable_irdp}" = "yes"; then
-    AC_MSG_ERROR(['IRDP requires in_pktinfo at the moment!'])
-  fi], [FRR_INCLUDES])
+
+AC_CHECK_TYPES([struct in_pktinfo], [
+  AC_CHECK_TYPES([struct icmphdr], [
+    IRDP=true
+  ], [
+    IRDP=false
+  ], [FRR_INCLUDES])
+], [
+  IRDP=false
+], [FRR_INCLUDES])
+
+case "${enable_irdp}" in
+yes)
+  $IRDP || AC_MSG_ERROR(['IRDP requires in_pktinfo at the moment!'])
+  ;;
+no)
+  IRDP=false
+  ;;
+esac
+
+AM_CONDITIONAL(IRDP, $IRDP)
 
 dnl -----------------------
 dnl checking for IP_PKTINFO
@@ -1708,6 +1723,21 @@ AC_CHECK_HEADER([malloc.h],
   )
  ], [], FRR_INCLUDES)
 
+dnl ------
+dnl ZeroMQ
+dnl ------
+if test "x$enable_zeromq" != "xno"; then
+  PKG_CHECK_MODULES(ZEROMQ, [libzmq >= 4.0.0], [
+    AC_DEFINE(HAVE_ZEROMQ, 1, [Enable ZeroMQ support])
+    ZEROMQ=true
+  ], [
+    if test "x$enable_zeromq" = "xyes"; then
+      AC_MSG_ERROR([configuration specifies --enable-zeromq but libzmq was not found])
+    fi
+  ])
+fi
+AM_CONDITIONAL([ZEROMQ], test "x$ZEROMQ" = "xtrue")
+
 dnl ----------
 dnl configure date
 dnl ----------
@@ -1775,6 +1805,30 @@ AC_SUBST(CFG_STATE)
 AC_SUBST(CFG_MODULE)
 AC_DEFINE_UNQUOTED(MODULE_PATH, "$CFG_MODULE", path to modules)
 
+dnl ------------------------------------
+dnl Enable RPKI and add librtr to libs
+dnl ------------------------------------
+if test "${enable_rpki}" = "yes"; then
+  PKG_CHECK_MODULES(RTRLIB,[rtrlib >= 0.5.0],
+      [AC_DEFINE(HAVE_RPKI,1,Enable RPKI prefix validation for BGP)
+      RPKI=true],
+      [RPKI=false
+      AC_MSG_ERROR([rtrlib was not found on your system or is too old.])]
+  )
+fi
+AM_CONDITIONAL([RPKI], test "x$RPKI" = "xtrue")
+
+dnl ------------------------------------------
+dnl Check whether rtrlib was build with ssh support
+dnl ------------------------------------------
+AC_MSG_CHECKING([whether the RTR Library is compiled with SSH])
+AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include "rtrlib/rtrlib.h"]],
+			[[struct tr_ssh_config config;]])],
+	[AC_MSG_RESULT(yes)
+	AC_DEFINE(FOUND_SSH,,found_ssh)],
+	AC_MSG_RESULT(no)
+)
+
 dnl ---------------------------
 dnl Check htonl works correctly
 dnl ---------------------------
@@ -1787,13 +1841,13 @@ AC_CACHE_VAL(ac_cv_htonl_works,
 AC_MSG_RESULT($ac_cv_htonl_works)
 
 AC_CONFIG_FILES([Makefile
-	  bgpd/Makefile watchfrr/Makefile
+	  bgpd/Makefile
 	  vtysh/Makefile
 	  doc/Makefile tests/Makefile
 	  bgpd/rfp-example/rfptest/Makefile bgpd/rfp-example/librfp/Makefile
-	  pimd/Makefile
-	  tools/Makefile
 	  redhat/frr.spec
+	  debianpkg/Makefile
+	  debianpkg/changelog
 	  snapcraft/snapcraft.yaml
 	  lib/version.h
 	  tests/lib/cli/test_cli.refout
@@ -1813,6 +1867,7 @@ AC_CONFIG_FILES([Makefile
 	  doc/watchfrr.8
 	  doc/zebra.8
 	  doc/frr.1
+	  doc/frr-args.8
 	  pkgsrc/bgpd.sh pkgsrc/ospf6d.sh pkgsrc/ospfd.sh
 	  pkgsrc/ripd.sh pkgsrc/ripngd.sh pkgsrc/zebra.sh
 	  pkgsrc/eigrpd.sh])

@@ -482,6 +482,34 @@ void bgp_parse_nexthop_update(int command, vrf_id_t vrf_id)
 	evaluate_paths(bnc);
 }
 
+/*
+ * Cleanup nexthop registration and status information for BGP nexthops
+ * pertaining to this VRF. This is invoked upon VRF deletion.
+ */
+void bgp_cleanup_nexthops(struct bgp *bgp)
+{
+	afi_t afi;
+	struct bgp_node *rn;
+	struct bgp_nexthop_cache *bnc;
+
+	for (afi = AFI_IP; afi < AFI_MAX; afi++) {
+		if (!bgp->nexthop_cache_table[afi])
+			continue;
+
+		for (rn = bgp_table_top(bgp->nexthop_cache_table[afi]); rn;
+		     rn = bgp_route_next(rn)) {
+			bnc = rn->info;
+			if (!bnc)
+				continue;
+
+			/* Clear relevant flags. */
+			UNSET_FLAG(bnc->flags, BGP_NEXTHOP_VALID);
+			UNSET_FLAG(bnc->flags, BGP_NEXTHOP_REGISTERED);
+			UNSET_FLAG(bnc->flags, BGP_NEXTHOP_PEER_NOTIFIED);
+		}
+	}
+}
+
 /**
  * make_prefix - make a prefix structure from the path (essentially
  * path's node.
@@ -560,8 +588,10 @@ static void sendmsg_zebra_rnh(struct bgp_nexthop_cache *bnc, int command)
 	s = zclient->obuf;
 	stream_reset(s);
 	zclient_create_header(s, command, bnc->bgp->vrf_id);
-	if (CHECK_FLAG(bnc->flags, BGP_NEXTHOP_CONNECTED)
-	    || CHECK_FLAG(bnc->flags, BGP_STATIC_ROUTE_EXACT_MATCH))
+	if ((command == ZEBRA_NEXTHOP_REGISTER ||
+	     command == ZEBRA_IMPORT_ROUTE_REGISTER) &&
+	    (CHECK_FLAG(bnc->flags, BGP_NEXTHOP_CONNECTED)
+	     || CHECK_FLAG(bnc->flags, BGP_STATIC_ROUTE_EXACT_MATCH)))
 		stream_putc(s, 1);
 	else
 		stream_putc(s, 0);
@@ -659,8 +689,7 @@ static void evaluate_paths(struct bgp_nexthop_cache *bnc)
 			buf, bnc->flags, bnc->change_flags);
 	}
 
-	LIST_FOREACH(path, &(bnc->paths), nh_thread)
-	{
+	LIST_FOREACH (path, &(bnc->paths), nh_thread) {
 		if (!(path->type == ZEBRA_ROUTE_BGP
 		      && ((path->sub_type == BGP_ROUTE_NORMAL)
 			  || (path->sub_type == BGP_ROUTE_STATIC))))

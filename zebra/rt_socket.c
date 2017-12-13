@@ -42,11 +42,6 @@
 
 extern struct zebra_privs_t zserv_privs;
 
-/* kernel socket export */
-extern int rtm_write(int message, union sockunion *dest, union sockunion *mask,
-		     union sockunion *gate, union sockunion *mpls,
-		     unsigned int index, int zebra_flags, int metric);
-
 #ifdef HAVE_STRUCT_SOCKADDR_IN_SIN_LEN
 /* Adjust netmask socket length. Return value is a adjusted sin_len
    value. */
@@ -71,6 +66,27 @@ static int sin_masklen(struct in_addr mask)
 }
 #endif /* HAVE_STRUCT_SOCKADDR_IN_SIN_LEN */
 
+#ifdef __OpenBSD__
+static int kernel_rtm_add_labels(struct nexthop_label *nh_label,
+				 struct sockaddr_mpls *smpls)
+{
+	if (nh_label->num_labels > 1) {
+		zlog_warn(
+			"%s: can't push %u labels at "
+			"once (maximum is 1)",
+			__func__, nh_label->num_labels);
+		return -1;
+	}
+
+	memset(smpls, 0, sizeof(*smpls));
+	smpls->smpls_len = sizeof(*smpls);
+	smpls->smpls_family = AF_MPLS;
+	smpls->smpls_label = htonl(nh_label->label[0] << MPLS_LABEL_OFFSET);
+
+	return 0;
+}
+#endif
+
 /* Interface between zebra message and rtm message. */
 static int kernel_rtm_ipv4(int cmd, struct prefix *p, struct route_entry *re)
 
@@ -87,6 +103,7 @@ static int kernel_rtm_ipv4(int cmd, struct prefix *p, struct route_entry *re)
 	int gate = 0;
 	int error;
 	char prefix_buf[PREFIX_STRLEN];
+	enum blackhole_type bh_type = BLACKHOLE_UNSPEC;
 
 	if (IS_ZEBRA_DEBUG_RIB)
 		prefix2str(p, prefix_buf, sizeof(prefix_buf));
@@ -119,7 +136,7 @@ static int kernel_rtm_ipv4(int cmd, struct prefix *p, struct route_entry *re)
 		 * other than ADD and DELETE?
 		 */
 		if ((cmd == RTM_ADD
-		     && CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE))
+		     && NEXTHOP_IS_ACTIVE(nexthop->flags))
 		    || (cmd == RTM_DELETE
 			&& CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_FIB))) {
 			if (nexthop->type == NEXTHOP_TYPE_IPV4
@@ -134,6 +151,7 @@ static int kernel_rtm_ipv4(int cmd, struct prefix *p, struct route_entry *re)
 				struct in_addr loopback;
 				loopback.s_addr = htonl(INADDR_LOOPBACK);
 				sin_gate.sin_addr = loopback;
+				bh_type = nexthop->bh_type;
 				gate = 1;
 			}
 
@@ -150,22 +168,18 @@ static int kernel_rtm_ipv4(int cmd, struct prefix *p, struct route_entry *re)
 			}
 
 #ifdef __OpenBSD__
-			if (nexthop->nh_label) {
-				memset(&smpls, 0, sizeof(smpls));
-				smpls.smpls_len = sizeof(smpls);
-				smpls.smpls_family = AF_MPLS;
-				smpls.smpls_label =
-					htonl(nexthop->nh_label->label[0]
-					      << MPLS_LABEL_OFFSET);
-				smplsp = (union sockunion *)&smpls;
-			}
+			if (nexthop->nh_label
+			    && !kernel_rtm_add_labels(nexthop->nh_label,
+						      &smpls))
+				continue;
+			smplsp = (union sockunion *)&smpls;
 #endif
 
-			error = rtm_write(
-				cmd, (union sockunion *)&sin_dest,
-				(union sockunion *)mask,
-				gate ? (union sockunion *)&sin_gate : NULL,
-				smplsp, ifindex, re->flags, re->metric);
+			error = rtm_write(cmd, (union sockunion *)&sin_dest,
+					  (union sockunion *)mask,
+					  gate ? (union sockunion *)&sin_gate
+					       : NULL,
+					  smplsp, ifindex, bh_type, re->metric);
 
 			if (IS_ZEBRA_DEBUG_RIB) {
 				if (!gate) {
@@ -187,9 +201,6 @@ static int kernel_rtm_ipv4(int cmd, struct prefix *p, struct route_entry *re)
 					zlog_debug(
 						"%s: %s: successfully did NH %s",
 						__func__, prefix_buf, gate_buf);
-				if (cmd == RTM_ADD)
-					SET_FLAG(nexthop->flags,
-						 NEXTHOP_FLAG_FIB);
 				break;
 
 			/* The only valid case for this error is kernel's
@@ -266,11 +277,16 @@ static int kernel_rtm_ipv6(int cmd, struct prefix *p, struct route_entry *re)
 {
 	struct sockaddr_in6 *mask;
 	struct sockaddr_in6 sin_dest, sin_mask, sin_gate;
+#ifdef __OpenBSD__
+	struct sockaddr_mpls smpls;
+#endif
+	union sockunion *smplsp = NULL;
 	struct nexthop *nexthop;
 	int nexthop_num = 0;
 	ifindex_t ifindex = 0;
 	int gate = 0;
 	int error;
+	enum blackhole_type bh_type = BLACKHOLE_UNSPEC;
 
 	memset(&sin_dest, 0, sizeof(struct sockaddr_in6));
 	sin_dest.sin6_family = AF_INET6;
@@ -295,12 +311,8 @@ static int kernel_rtm_ipv6(int cmd, struct prefix *p, struct route_entry *re)
 		gate = 0;
 
 		if ((cmd == RTM_ADD
-		     && CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE))
-		    || (cmd == RTM_DELETE
-#if 0
-	      && CHECK_FLAG (nexthop->flags, NEXTHOP_FLAG_FIB)
-#endif
-			)) {
+		     && NEXTHOP_IS_ACTIVE(nexthop->flags))
+		    || (cmd == RTM_DELETE)) {
 			if (nexthop->type == NEXTHOP_TYPE_IPV6
 			    || nexthop->type == NEXTHOP_TYPE_IPV6_IFINDEX) {
 				sin_gate.sin6_addr = nexthop->gate.ipv6;
@@ -310,8 +322,8 @@ static int kernel_rtm_ipv6(int cmd, struct prefix *p, struct route_entry *re)
 			    || nexthop->type == NEXTHOP_TYPE_IPV6_IFINDEX)
 				ifindex = nexthop->ifindex;
 
-			if (cmd == RTM_ADD)
-				SET_FLAG(nexthop->flags, NEXTHOP_FLAG_FIB);
+			if (nexthop->type == NEXTHOP_TYPE_BLACKHOLE)
+				bh_type = nexthop->bh_type;
 		}
 
 /* Under kame set interface index to link local address. */
@@ -338,20 +350,18 @@ static int kernel_rtm_ipv6(int cmd, struct prefix *p, struct route_entry *re)
 			mask = &sin_mask;
 		}
 
+#ifdef __OpenBSD__
+		if (nexthop->nh_label
+		    && !kernel_rtm_add_labels(nexthop->nh_label, &smpls))
+			continue;
+		smplsp = (union sockunion *)&smpls;
+#endif
+
 		error = rtm_write(cmd, (union sockunion *)&sin_dest,
 				  (union sockunion *)mask,
 				  gate ? (union sockunion *)&sin_gate : NULL,
-				  NULL, ifindex, re->flags, re->metric);
-
-#if 0
-      if (error)
-	{
-	  zlog_info ("kernel_rtm_ipv6(): nexthop %d add error=%d.",
-	    nexthop_num, error);
-	}
-#else
+				  smplsp, ifindex, bh_type, re->metric);
 		(void)error;
-#endif
 
 		nexthop_num++;
 	}
@@ -377,14 +387,14 @@ static int kernel_rtm(int cmd, struct prefix *p, struct route_entry *re)
 	return 0;
 }
 
-int kernel_route_rib(struct prefix *p, struct prefix *src_p,
-		     struct route_entry *old, struct route_entry *new)
+void kernel_route_rib(struct prefix *p, struct prefix *src_p,
+		      struct route_entry *old, struct route_entry *new)
 {
 	int route = 0;
 
 	if (src_p && src_p->prefixlen) {
 		zlog_err("route add: IPv6 sourcedest routes unsupported!");
-		return 1;
+		return;
 	}
 
 	if (zserv_privs.change(ZPRIVS_RAISE))
@@ -399,7 +409,17 @@ int kernel_route_rib(struct prefix *p, struct prefix *src_p,
 	if (zserv_privs.change(ZPRIVS_LOWER))
 		zlog_err("Can't lower privileges");
 
-	return route;
+	if (new) {
+		kernel_route_rib_pass_fail(p, new,
+					   (!route) ?
+					   SOUTHBOUND_INSTALL_SUCCESS :
+					   SOUTHBOUND_INSTALL_FAILURE);
+	} else {
+		kernel_route_rib_pass_fail(p, old,
+					   (!route) ?
+					   SOUTHBOUND_DELETE_SUCCESS :
+					   SOUTHBOUND_DELETE_FAILURE);
+	}
 }
 
 int kernel_neigh_update(int add, int ifindex, uint32_t addr, char *lla,

@@ -23,10 +23,7 @@
 
 #include "redistribute.h"
 #include "vrf.h"
-
-#ifdef HAVE_IRDP
-#include "zebra/irdp.h"
-#endif
+#include "hook.h"
 
 #include "zebra/zebra_l2.h"
 
@@ -173,7 +170,12 @@ struct rtadvconf {
 #define RTADV_PREF_MEDIUM 0x0 /* Per RFC4191. */
 
 	u_char inFastRexmit; /* True if we're rexmits faster than usual */
-	u_char configured;   /* Has operator configured RA? */
+
+	/* Track if RA was configured by BGP or by the Operator or both */
+	u_char ra_configured;     /* Was RA configured? */
+#define BGP_RA_CONFIGURED (1<<0)  /* BGP configured RA? */
+#define VTY_RA_CONFIGURED (1<<1)  /* Operator configured RA? */
+#define VTY_RA_INTERVAL_CONFIGURED (1<<2)  /* Operator configured RA interval */
 	int
 		NumFastReXmitsRemain; /* Loaded first with number of fast
 					 rexmits to do */
@@ -186,12 +188,12 @@ struct rtadvconf {
 
 /* Zebra interface type - ones of interest. */
 typedef enum {
-	ZEBRA_IF_VXLAN,   /* VxLAN interface */
-	ZEBRA_IF_VRF,     /* VRF device */
-	ZEBRA_IF_BRIDGE,  /* bridge device */
-	ZEBRA_IF_VLAN,    /* VLAN sub-interface */
-	ZEBRA_IF_MACVLAN, /* MAC VLAN interface*/
-	ZEBRA_IF_OTHER,   /* Anything else */
+	ZEBRA_IF_OTHER = 0, /* Anything else */
+	ZEBRA_IF_VXLAN,     /* VxLAN interface */
+	ZEBRA_IF_VRF,       /* VRF device */
+	ZEBRA_IF_BRIDGE,    /* bridge device */
+	ZEBRA_IF_VLAN,      /* VLAN sub-interface */
+	ZEBRA_IF_MACVLAN,   /* MAC VLAN interface*/
 } zebra_iftype_t;
 
 /* Zebra "slave" interface type */
@@ -201,6 +203,8 @@ typedef enum {
 	ZEBRA_IF_SLAVE_BRIDGE, /* Member of a bridge */
 	ZEBRA_IF_SLAVE_OTHER,  /* Something else - e.g., bond slave */
 } zebra_slave_iftype_t;
+
+struct irdp_interface;
 
 /* `zebra' daemon local interface structure. */
 struct zebra_if {
@@ -227,9 +231,7 @@ struct zebra_if {
 	unsigned int ra_sent, ra_rcvd;
 #endif /* HAVE_RTADV */
 
-#ifdef HAVE_IRDP
-	struct irdp_interface irdp;
-#endif
+	struct irdp_interface *irdp;
 
 #ifdef HAVE_STRUCT_SOCKADDR_DL
 	union {
@@ -272,6 +274,11 @@ struct zebra_if {
 	ifindex_t link_ifindex;
 	struct interface *link;
 };
+
+DECLARE_HOOK(zebra_if_extra_info, (struct vty *vty, struct interface *ifp),
+				  (vty, ifp))
+DECLARE_HOOK(zebra_if_config_wr, (struct vty *vty, struct interface *ifp),
+				 (vty, ifp))
 
 static inline void zebra_if_set_ziftype(struct interface *ifp,
 					zebra_iftype_t zif_type,

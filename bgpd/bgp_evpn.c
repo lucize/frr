@@ -45,6 +45,8 @@
 #include "bgpd/bgp_encap_types.h"
 #include "bgpd/bgp_debug.h"
 #include "bgpd/bgp_aspath.h"
+#include "bgpd/bgp_zebra.h"
+#include "bgpd/bgp_nexthop.h"
 
 /*
  * Definitions and external declarations.
@@ -286,7 +288,7 @@ static void unmap_vni_from_rt(struct bgp *bgp, struct bgpevpn *vpn,
 	/* Delete VNI from hash list for this RT. */
 	listnode_delete(irt->vnis, vpn);
 	if (!listnode_head(irt->vnis)) {
-		list_free(irt->vnis);
+		list_delete_and_null(&irt->vnis);
 		import_rt_free(bgp, irt);
 	}
 }
@@ -1199,6 +1201,13 @@ static int handle_tunnel_ip_change(struct bgp *bgp, struct bgpevpn *vpn,
 		return 0;
 	}
 
+	/* Update the tunnel-ip hash */
+	bgp_tip_del(bgp, &vpn->originator_ip);
+	bgp_tip_add(bgp, &originator_ip);
+
+	/* filter routes as martian nexthop db has changed */
+	bgp_filter_evpn_routes_upon_martian_nh_change(bgp);
+
 	/* Need to withdraw type-3 route as the originator IP is part
 	 * of the key.
 	 */
@@ -2038,11 +2047,10 @@ static void evpn_mpattr_encode_type5(struct stream *s, struct prefix *p,
 		len = 8; /* ipv4 */
 	else
 		len = 32; /* ipv6 */
-	stream_putc(s, BGP_EVPN_IP_PREFIX_ROUTE);
 	/* Prefix contains RD, ESI, EthTag, IP length, IP, GWIP and VNI */
 	stream_putc(s, 8 + 10 + 4 + 1 + len + 3);
 	stream_put(s, prd->val, 8);
-	if (attr && attr)
+	if (attr)
 		stream_put(s, &(attr->evpn_overlay.eth_s_id), 10);
 	else
 		stream_put(s, &temp, 10);
@@ -2052,7 +2060,7 @@ static void evpn_mpattr_encode_type5(struct stream *s, struct prefix *p,
 		stream_put_ipv4(s, p_evpn_p->ip.ipaddr_v4.s_addr);
 	else
 		stream_put(s, &p_evpn_p->ip.ipaddr_v6, 16);
-	if (attr && attr) {
+	if (attr) {
 		if (IS_IPADDR_V4(&p_evpn_p->ip))
 			stream_put_ipv4(s,
 					attr->evpn_overlay.gw_ip.ipv4.s_addr);
@@ -2179,6 +2187,71 @@ char *bgp_evpn_label2str(mpls_label_t *label, char *buf, int len)
 }
 
 /*
+ * Function to convert evpn route to json format.
+ * NOTE: We don't use prefix2str as the output here is a bit different.
+ */
+void bgp_evpn_route2json(struct prefix_evpn *p, json_object *json)
+{
+	char buf1[ETHER_ADDR_STRLEN];
+	char buf2[PREFIX2STR_BUFFER];
+
+	if (!json)
+		return;
+
+	if (p->prefix.route_type == BGP_EVPN_IMET_ROUTE) {
+		json_object_int_add(json, "routeType", p->prefix.route_type);
+		json_object_int_add(json, "ethTag", 0);
+		json_object_int_add(json, "ipLen",
+				    IS_EVPN_PREFIX_IPADDR_V4(p)
+					    ? IPV4_MAX_BITLEN
+					    : IPV6_MAX_BITLEN);
+		json_object_string_add(json, "ip",
+				       inet_ntoa(p->prefix.ip.ipaddr_v4));
+	} else if (p->prefix.route_type == BGP_EVPN_MAC_IP_ROUTE) {
+		if (IS_EVPN_PREFIX_IPADDR_NONE(p)) {
+			json_object_int_add(json, "routeType",
+					    p->prefix.route_type);
+			json_object_int_add(
+				json, "esi",
+				0); /* TODO: we don't support esi yet */
+			json_object_int_add(json, "ethTag", 0);
+			json_object_int_add(json, "macLen", 8 * ETH_ALEN);
+			json_object_string_add(json, "mac",
+					       prefix_mac2str(&p->prefix.mac,
+							      buf1,
+							      sizeof(buf1)));
+		} else {
+			u_char family;
+
+			family = IS_EVPN_PREFIX_IPADDR_V4(p) ? AF_INET
+							     : AF_INET6;
+
+			json_object_int_add(json, "routeType",
+					    p->prefix.route_type);
+			json_object_int_add(
+				json, "esi",
+				0); /* TODO: we don't support esi yet */
+			json_object_int_add(json, "ethTag", 0);
+			json_object_int_add(json, "macLen", 8 * ETH_ALEN);
+			json_object_string_add(json, "mac",
+					       prefix_mac2str(&p->prefix.mac,
+							      buf1,
+							      sizeof(buf1)));
+			json_object_int_add(json, "ipLen",
+					    IS_EVPN_PREFIX_IPADDR_V4(p)
+						    ? IPV4_MAX_BITLEN
+						    : IPV6_MAX_BITLEN);
+			json_object_string_add(
+				json, "ip",
+				inet_ntop(family, &p->prefix.ip.ip.addr, buf2,
+					  PREFIX2STR_BUFFER));
+		}
+	} else {
+		/* Currently, this is to cater to other AF_ETHERNET code. */
+	}
+}
+
+/*
  * Function to convert evpn route to string.
  * NOTE: We don't use prefix2str as the output here is a bit different.
  */
@@ -2214,6 +2287,8 @@ char *bgp_evpn_route2str(struct prefix_evpn *p, char *buf, int len)
 		}
 	} else {
 		/* For EVPN route types not supported yet. */
+		snprintf(buf, len, "(unsupported route type %d)",
+			 p->prefix.route_type);
 	}
 
 	return (buf);
@@ -2467,7 +2542,7 @@ void bgp_evpn_derive_auto_rd(struct bgp *bgp, struct bgpevpn *vpn)
 	vpn->prd.family = AF_UNSPEC;
 	vpn->prd.prefixlen = 64;
 	sprintf(buf, "%s:%hu", inet_ntoa(bgp->router_id), vpn->rd_id);
-	str2prefix_rd(buf, &vpn->prd);
+	(void)str2prefix_rd(buf, &vpn->prd);
 	UNSET_FLAG(vpn->flags, VNI_FLAG_RD_CFGD);
 }
 
@@ -2534,10 +2609,8 @@ void bgp_evpn_free(struct bgp *bgp, struct bgpevpn *vpn)
 {
 	bgp_table_unlock(vpn->route_table);
 	bgp_evpn_unmap_vni_from_its_rts(bgp, vpn);
-	list_delete(vpn->import_rtl);
-	list_delete(vpn->export_rtl);
-	vpn->import_rtl = NULL;
-	vpn->export_rtl = NULL;
+	list_delete_and_null(&vpn->import_rtl);
+	list_delete_and_null(&vpn->export_rtl);
 	bf_release_index(bgp->rd_idspace, vpn->rd_id);
 	hash_release(bgp->vnihash, vpn);
 	QOBJ_UNREG(vpn);
@@ -2560,6 +2633,71 @@ int bgp_evpn_unimport_route(struct bgp *bgp, afi_t afi, safi_t safi,
 			    struct prefix *p, struct bgp_info *ri)
 {
 	return install_uninstall_evpn_route(bgp, afi, safi, p, ri, 0);
+}
+
+/* filter routes which have martian next hops */
+int bgp_filter_evpn_routes_upon_martian_nh_change(struct bgp *bgp)
+{
+	afi_t afi;
+	safi_t safi;
+	struct bgp_node *rd_rn, *rn;
+	struct bgp_table *table;
+	struct bgp_info *ri;
+
+	afi = AFI_L2VPN;
+	safi = SAFI_EVPN;
+
+	/* Walk entire global routing table and evaluate routes which could be
+	 * imported into this VPN. Note that we cannot just look at the routes
+	 * for the VNI's RD -
+	 * remote routes applicable for this VNI could have any RD.
+	 */
+	/* EVPN routes are a 2-level table. */
+	for (rd_rn = bgp_table_top(bgp->rib[afi][safi]); rd_rn;
+	     rd_rn = bgp_route_next(rd_rn)) {
+		table = (struct bgp_table *)(rd_rn->info);
+		if (!table)
+			continue;
+
+		for (rn = bgp_table_top(table); rn; rn = bgp_route_next(rn)) {
+
+			for (ri = rn->info; ri; ri = ri->next) {
+
+				/* Consider "valid" remote routes applicable for
+				 * this VNI. */
+				if (!(ri->type == ZEBRA_ROUTE_BGP
+				      && ri->sub_type == BGP_ROUTE_NORMAL))
+					continue;
+
+				if (bgp_nexthop_self(bgp, ri->attr->nexthop)) {
+
+					char attr_str[BUFSIZ];
+					char pbuf[PREFIX_STRLEN];
+
+					bgp_dump_attr(ri->attr, attr_str,
+						      BUFSIZ);
+
+					if (bgp_debug_update(ri->peer, &rn->p,
+							     NULL, 1))
+						zlog_debug(
+							"%u: prefix %s with attr %s - DENIED due to martian or self nexthop",
+							bgp->vrf_id,
+							prefix2str(
+								&rn->p, pbuf,
+								sizeof(pbuf)),
+							attr_str);
+
+					bgp_evpn_unimport_route(bgp, afi, safi,
+								&rn->p, ri);
+
+					bgp_rib_remove(rn, ri, ri->peer, afi,
+						       safi);
+				}
+			}
+		}
+	}
+
+	return 0;
 }
 
 /*
@@ -2657,6 +2795,11 @@ int bgp_evpn_local_vni_del(struct bgp *bgp, vni_t vni)
 	 */
 	delete_routes_for_vni(bgp, vpn);
 
+	/*
+	 * tunnel is no longer active, del tunnel ip address from tip_hash
+	 */
+	bgp_tip_del(bgp, &vpn->originator_ip);
+
 	/* Clear "live" flag and see if hash needs to be freed. */
 	UNSET_FLAG(vpn->flags, VNI_FLAG_LIVE);
 	if (!is_vni_configured(vpn))
@@ -2704,12 +2847,18 @@ int bgp_evpn_local_vni_add(struct bgp *bgp, vni_t vni,
 		}
 	}
 
-	/* if the VNI is live already, there is nothibng more to do */
+	/* if the VNI is live already, there is nothing more to do */
 	if (is_vni_live(vpn))
 		return 0;
 
 	/* Mark as "live" */
 	SET_FLAG(vpn->flags, VNI_FLAG_LIVE);
+
+	/* tunnel is now active, add tunnel-ip to db */
+	bgp_tip_add(bgp, &originator_ip);
+
+	/* filter routes as nexthop database has changed */
+	bgp_filter_evpn_routes_upon_martian_nh_change(bgp);
 
 	/* Create EVPN type-3 route and schedule for processing. */
 	build_evpn_type3_prefix(&p, vpn->originator_ip);
@@ -2724,6 +2873,10 @@ int bgp_evpn_local_vni_add(struct bgp *bgp, vni_t vni,
 	 * install them.
 	 */
 	install_routes_for_vni(bgp, vpn);
+
+	/* If we are advertising gateway mac-ip
+	   It needs to be conveyed again to zebra */
+	bgp_zebra_advertise_gw_macip(bgp, vpn->advertise_gw_macip, vpn->vni);
 
 	return 0;
 }

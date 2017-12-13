@@ -74,6 +74,7 @@ struct vtysh_client vtysh_client[] = {
 	{.fd = -1, .name = "nhrpd", .flag = VTYSH_NHRPD, .next = NULL},
 	{.fd = -1, .name = "eigrpd", .flag = VTYSH_EIGRPD, .next = NULL},
 	{.fd = -1, .name = "babeld", .flag = VTYSH_BABELD, .next = NULL},
+        {.fd = -1, .name = "sharpd", .flag = VTYSH_SHARPD, .next = NULL},
 	{.fd = -1, .name = "watchfrr", .flag = VTYSH_WATCHFRR, .next = NULL},
 };
 
@@ -226,7 +227,8 @@ static int vtysh_client_run_all(struct vtysh_client *head_client,
 			wrong_instance++;
 			continue;
 		}
-		correct_instance++;
+		if (client->fd > 0)
+			correct_instance++;
 		if (rc != CMD_SUCCESS) {
 			if (!continue_on_err)
 				return rc;
@@ -250,6 +252,13 @@ static int vtysh_client_execute(struct vtysh_client *head_client,
 
 static void vtysh_client_config(struct vtysh_client *head_client, char *line)
 {
+	/* watchfrr currently doesn't load any config, and has some hardcoded
+	 * settings that show up in "show run".  skip it here (for now at
+	 * least) so we don't get that mangled up in config-write.
+	 */
+	if (head_client->flag == VTYSH_WATCHFRR)
+		return;
+
 	vtysh_client_run_all(head_client, line, 1, NULL,
 			     vtysh_config_parse_line, NULL);
 }
@@ -416,8 +425,23 @@ static int vtysh_execute_func(const char *line, int pager)
 		}
 
 		cmd_stat = CMD_SUCCESS;
+		struct vtysh_client *vc;
 		for (i = 0; i < array_size(vtysh_client); i++) {
 			if (cmd->daemon & vtysh_client[i].flag) {
+				if (vtysh_client[i].fd < 0
+				    && (cmd->daemon == vtysh_client[i].flag)) {
+					bool any_inst = false;
+					for (vc = &vtysh_client[i]; vc;
+					     vc = vc->next)
+						any_inst = any_inst
+							   || (vc->fd > 0);
+					if (!any_inst) {
+						fprintf(stderr,
+							"%s is not running\n",
+							vtysh_client[i].name);
+						continue;
+					}
+				}
 				cmd_stat = vtysh_client_execute(
 					&vtysh_client[i], line, fp);
 				if (cmd_stat != CMD_SUCCESS)
@@ -550,6 +574,7 @@ int vtysh_mark_file(const char *filename)
 		 * appropriate */
 		if (strlen(vty_buf_trimmed) == 3
 		    && strncmp("end", vty_buf_trimmed, 3) == 0) {
+			cmd_free_strvec(vline);
 			continue;
 		}
 
@@ -745,6 +770,7 @@ int vtysh_config_from_file(struct vty *vty, FILE *fp)
 							lineno, cmd_stat,
 							vtysh_client[i].name,
 							vty->buf);
+						retcode = cmd_stat;
 						break;
 					}
 				}
@@ -780,20 +806,23 @@ static int vtysh_rl_describe(void)
 	} else if (rl_end && isspace((int)rl_line_buffer[rl_end - 1]))
 		vector_set(vline, NULL);
 
-	describe = cmd_describe_command(vline, vty, &ret);
-
 	fprintf(stdout, "\n");
+
+	describe = cmd_describe_command(vline, vty, &ret);
 
 	/* Ambiguous and no match error. */
 	switch (ret) {
 	case CMD_ERR_AMBIGUOUS:
 		cmd_free_strvec(vline);
+		vector_free(describe);
 		fprintf(stdout, "%% Ambiguous command.\n");
 		rl_on_new_line();
 		return 0;
 		break;
 	case CMD_ERR_NO_MATCH:
 		cmd_free_strvec(vline);
+		if (describe)
+			vector_free(describe);
 		fprintf(stdout, "%% There is no matched command.\n");
 		rl_on_new_line();
 		return 0;
@@ -1017,6 +1046,10 @@ struct cmd_node link_params_node = {
 	LINK_PARAMS_NODE, "%s(config-link-params)# ",
 };
 
+#if defined(HAVE_RPKI)
+static struct cmd_node rpki_node = {RPKI_NODE, "%s(config-rpki)# ", 1};
+#endif
+
 /* Defined in lib/vty.c */
 extern struct cmd_node vty_node;
 
@@ -1153,6 +1186,37 @@ DEFUNSH(VTYSH_BGPD, address_family_ipv6_labeled_unicast,
 	return CMD_SUCCESS;
 }
 
+#if defined(HAVE_RPKI)
+DEFUNSH(VTYSH_BGPD,
+	rpki,
+	rpki_cmd,
+	"rpki",
+	"Enable rpki and enter rpki configuration mode\n")
+{
+	vty->node = RPKI_NODE;
+	return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_BGPD,
+	rpki_exit,
+	rpki_exit_cmd,
+	"exit",
+	"Exit current mode and down to previous mode\n")
+{
+	vty->node = CONFIG_NODE;
+	return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_BGPD,
+	rpki_quit,
+	rpki_quit_cmd,
+	"quit",
+	"Exit current mode and down to previous mode\n")
+{
+	return rpki_exit(self, vty, argc, argv);
+}
+#endif
+
 DEFUNSH(VTYSH_BGPD, address_family_evpn, address_family_evpn_cmd,
 	"address-family <l2vpn evpn>",
 	"Enter Address Family command mode\n"
@@ -1249,10 +1313,12 @@ DEFUNSH(VTYSH_RIPNGD, router_ripng, router_ripng_cmd, "router ripng",
 	return CMD_SUCCESS;
 }
 
-DEFUNSH(VTYSH_OSPFD, router_ospf, router_ospf_cmd, "router ospf [(1-65535)]",
+DEFUNSH(VTYSH_OSPFD, router_ospf, router_ospf_cmd,
+	"router ospf [(1-65535)] [vrf NAME]",
 	"Enable a routing process\n"
 	"Start OSPF configuration\n"
-	"Instance ID\n")
+	"Instance ID\n"
+	VRF_CMD_HELP_STR)
 {
 	vty->node = OSPF_NODE;
 	return CMD_SUCCESS;
@@ -1844,38 +1910,6 @@ DEFUN (vtysh_show_work_queues_daemon,
 	return ret;
 }
 
-DEFUN (vtysh_show_hashtable,
-       vtysh_show_hashtable_cmd,
-       "show hashtable [statistics]",
-       SHOW_STR
-       "Statistics about hash tables\n"
-       "Statistics about hash tables\n")
-{
-	char cmd[] = "do show hashtable statistics";
-	unsigned long i;
-	int ret = CMD_SUCCESS;
-
-	fprintf(stdout, "\n");
-	fprintf(stdout,
-		"Load factor (LF) - average number of elements across all buckets\n");
-	fprintf(stdout,
-		"Full load factor (FLF) - average number of elements across full buckets\n\n");
-
-	fprintf(stdout,
-		"Standard deviation (SD) is calculated for both the LF and FLF\n");
-	fprintf(stdout,
-		"and indicates the typical deviation of bucket chain length\n");
-	fprintf(stdout, "from the value in the corresponding load factor.\n\n");
-
-	for (i = 0; i < array_size(vtysh_client); i++)
-		if (vtysh_client[i].fd >= 0) {
-			ret = vtysh_client_execute(&vtysh_client[i], cmd,
-						   stdout);
-			fprintf(stdout, "\n");
-		}
-	return ret;
-}
-
 DEFUNSH(VTYSH_ZEBRA, vtysh_link_params, vtysh_link_params_cmd, "link-params",
 	LINK_PARAMS_STR)
 {
@@ -1907,6 +1941,39 @@ static int show_per_daemon(const char *line, const char *headline)
 	return ret;
 }
 
+DEFUN (vtysh_show_debugging,
+       vtysh_show_debugging_cmd,
+       "show debugging",
+       SHOW_STR
+       DEBUG_STR)
+{
+	return show_per_daemon("do show debugging\n",
+			       "");
+}
+
+DEFUN (vtysh_show_debugging_hashtable,
+       vtysh_show_debugging_hashtable_cmd,
+       "show debugging hashtable [statistics]",
+       SHOW_STR
+       DEBUG_STR
+       "Statistics about hash tables\n"
+       "Statistics about hash tables\n")
+{
+	fprintf(stdout, "\n");
+	fprintf(stdout,
+		"Load factor (LF) - average number of elements across all buckets\n");
+	fprintf(stdout,
+		"Full load factor (FLF) - average number of elements across full buckets\n\n");
+	fprintf(stdout,
+		"Standard deviation (SD) is calculated for both the LF and FLF\n");
+	fprintf(stdout,
+		"and indicates the typical deviation of bucket chain length\n");
+	fprintf(stdout, "from the value in the corresponding load factor.\n\n");
+
+	return show_per_daemon("do show debugging hashtable\n",
+			       "Hashtable statistics for %s:\n");
+}
+
 /* Memory */
 DEFUN (vtysh_show_memory,
        vtysh_show_memory_cmd,
@@ -1914,7 +1981,8 @@ DEFUN (vtysh_show_memory,
        SHOW_STR
        "Memory statistics\n")
 {
-	return show_per_daemon("show memory\n", "Memory statistics for %s:\n");
+	return show_per_daemon("show memory\n",
+			       "Memory statistics for %s:\n");
 }
 
 DEFUN (vtysh_show_modules,
@@ -1934,20 +2002,8 @@ DEFUN (vtysh_show_logging,
        SHOW_STR
        "Show current logging configuration\n")
 {
-	unsigned int i;
-	int ret = CMD_SUCCESS;
-	char line[] = "do show logging\n";
-
-	for (i = 0; i < array_size(vtysh_client); i++)
-		if (vtysh_client[i].fd >= 0) {
-			fprintf(stdout, "Logging configuration for %s:\n",
-				vtysh_client[i].name);
-			ret = vtysh_client_execute(&vtysh_client[i], line,
-						   stdout);
-			fprintf(stdout, "\n");
-		}
-
-	return ret;
+	return show_per_daemon("do show logging\n",
+			       "Logging configuration for %s:\n");
 }
 
 DEFUNSH(VTYSH_ALL, vtysh_log_stdout, vtysh_log_stdout_cmd, "log stdout",
@@ -2276,12 +2332,12 @@ int vtysh_write_config_integrated(void)
 
 	fprintf(stdout, "Building Configuration...\n");
 
-	backup_config_file(quagga_config);
-	fp = fopen(quagga_config, "w");
+	backup_config_file(frr_config);
+	fp = fopen(frr_config, "w");
 	if (fp == NULL) {
 		fprintf(stdout,
 			"%% Error: failed to open configuration file %s: %s\n",
-			quagga_config, safe_strerror(errno));
+			frr_config, safe_strerror(errno));
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 	fd = fileno(fp);
@@ -2294,7 +2350,7 @@ int vtysh_write_config_integrated(void)
 
 	if (fchmod(fd, CONFIGFILE_MASK) != 0) {
 		printf("%% Warning: can't chmod configuration file %s: %s\n",
-		       quagga_config, safe_strerror(errno));
+		       frr_config, safe_strerror(errno));
 		err++;
 	}
 
@@ -2326,18 +2382,18 @@ int vtysh_write_config_integrated(void)
 		if ((uid != (uid_t)-1 || gid != (gid_t)-1)
 		    && fchown(fd, uid, gid)) {
 			printf("%% Warning: can't chown configuration file %s: %s\n",
-			       quagga_config, safe_strerror(errno));
+			       frr_config, safe_strerror(errno));
 			err++;
 		}
 	} else {
-		printf("%% Warning: stat() failed on %s: %s\n", quagga_config,
+		printf("%% Warning: stat() failed on %s: %s\n", frr_config,
 		       safe_strerror(errno));
 		err++;
 	}
 
 	fclose(fp);
 
-	printf("Integrated configuration saved to %s\n", quagga_config);
+	printf("Integrated configuration saved to %s\n", frr_config);
 	if (err)
 		return CMD_WARNING;
 
@@ -2351,7 +2407,7 @@ static bool want_config_integrated(void)
 
 	switch (vtysh_write_integrated) {
 	case WRITE_INTEGRATED_UNSPECIFIED:
-		if (stat(quagga_config, &s) && errno == ENOENT)
+		if (stat(frr_config, &s) && errno == ENOENT)
 			return false;
 		return true;
 	case WRITE_INTEGRATED_NO:
@@ -2693,7 +2749,7 @@ static int vtysh_connect(struct vtysh_client *vclient)
 
 	if (!vclient->path[0])
 		snprintf(vclient->path, sizeof(vclient->path), "%s/%s.vty",
-			 vty_sock_path, vclient->name);
+			 vtydir, vclient->name);
 	path = vclient->path;
 
 	/* Stat socket to see if we have permission to access it. */
@@ -2787,7 +2843,7 @@ static void vtysh_update_all_insances(struct vtysh_client *head_client)
 		return;
 
 	/* ls vty_sock_dir and look for all files ending in .vty */
-	dir = opendir(vty_sock_path);
+	dir = opendir(vtydir);
 	if (dir) {
 		while ((file = readdir(dir)) != NULL) {
 			if (begins_with(file->d_name, "ospfd-")
@@ -2795,7 +2851,7 @@ static void vtysh_update_all_insances(struct vtysh_client *head_client)
 				if (n == MAXIMUM_INSTANCES) {
 					fprintf(stderr,
 						"Parsing %s, client limit(%d) reached!\n",
-						vty_sock_path, n);
+						vtydir, n);
 					break;
 				}
 				client = (struct vtysh_client *)malloc(
@@ -2804,7 +2860,7 @@ static void vtysh_update_all_insances(struct vtysh_client *head_client)
 				client->name = "ospfd";
 				client->flag = VTYSH_OSPFD;
 				snprintf(client->path, sizeof(client->path),
-					 "%s/%s", vty_sock_path, file->d_name);
+					 "%s/%s", vtydir, file->d_name);
 				client->next = NULL;
 				vtysh_client_sorted_insert(head_client, client);
 				n++;
@@ -2872,21 +2928,9 @@ void vtysh_readline_init(void)
 
 char *vtysh_prompt(void)
 {
-	static struct utsname names;
 	static char buf[100];
-	const char *hostname;
-	extern struct host host;
 
-	hostname = host.name;
-
-	if (!hostname) {
-		if (!names.nodename[0])
-			uname(&names);
-		hostname = names.nodename;
-	}
-
-	snprintf(buf, sizeof buf, cmd_prompt(vty->node), hostname);
-
+	snprintf(buf, sizeof buf, cmd_prompt(vty->node), cmd_hostname_get());
 	return buf;
 }
 
@@ -2971,6 +3015,9 @@ void vtysh_init_vty(void)
 	install_node(&keychain_key_node, NULL);
 	install_node(&isis_node, NULL);
 	install_node(&vty_node, NULL);
+#if defined(HAVE_RPKI)
+	install_node(&rpki_node, NULL);
+#endif
 
 	struct cmd_node *node;
 	for (unsigned int i = 0; i < vector_active(cmdvec); i++) {
@@ -3169,6 +3216,13 @@ void vtysh_init_vty(void)
 	install_element(BGP_EVPN_NODE, &exit_address_family_cmd);
 	install_element(BGP_IPV6L_NODE, &exit_address_family_cmd);
 
+#if defined(HAVE_RPKI)
+	install_element(CONFIG_NODE, &rpki_cmd);
+	install_element(RPKI_NODE, &rpki_exit_cmd);
+	install_element(RPKI_NODE, &rpki_quit_cmd);
+	install_element(RPKI_NODE, &vtysh_end_all_cmd);
+#endif
+
 	/* EVPN commands */
 	install_element(BGP_EVPN_NODE, &bgp_evpn_vni_cmd);
 	install_element(BGP_EVPN_VNI_NODE, &exit_vni_cmd);
@@ -3225,13 +3279,13 @@ void vtysh_init_vty(void)
 	install_element(ENABLE_NODE, &vtysh_start_zsh_cmd);
 #endif
 
+	install_element(VIEW_NODE, &vtysh_show_debugging_cmd);
+	install_element(VIEW_NODE, &vtysh_show_debugging_hashtable_cmd);
 	install_element(VIEW_NODE, &vtysh_show_memory_cmd);
 	install_element(VIEW_NODE, &vtysh_show_modules_cmd);
 
 	install_element(VIEW_NODE, &vtysh_show_work_queues_cmd);
 	install_element(VIEW_NODE, &vtysh_show_work_queues_daemon_cmd);
-
-	install_element(VIEW_NODE, &vtysh_show_hashtable_cmd);
 
 	install_element(VIEW_NODE, &vtysh_show_thread_cmd);
 

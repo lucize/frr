@@ -158,7 +158,7 @@ const char *eigrp_topology_ip_string(struct eigrp_prefix_entry *tn)
 	static char buf[EIGRP_IF_STRING_MAXLEN] = "";
 	u_int32_t ifaddr;
 
-	ifaddr = ntohl(tn->destination_ipv4->prefix.s_addr);
+	ifaddr = ntohl(tn->destination->u.prefix4.s_addr);
 	snprintf(buf, EIGRP_IF_STRING_MAXLEN, "%u.%u.%u.%u",
 		 (ifaddr >> 24) & 0xff, (ifaddr >> 16) & 0xff,
 		 (ifaddr >> 8) & 0xff, ifaddr & 0xff);
@@ -210,14 +210,14 @@ void show_ip_eigrp_interface_sub(struct vty *vty, struct eigrp *eigrp,
 				 struct eigrp_interface *ei)
 {
 	vty_out(vty, "%-11s ", eigrp_if_name_string(ei));
-	vty_out(vty, "%-11u", IF_DEF_PARAMS(ei->ifp)->bandwidth);
-	vty_out(vty, "%-11u", IF_DEF_PARAMS(ei->ifp)->delay);
+	vty_out(vty, "%-11u", ei->params.bandwidth);
+	vty_out(vty, "%-11u", ei->params.delay);
 	vty_out(vty, "%-7u", ei->nbrs->count);
 	vty_out(vty, "%u %c %-10u", 0, '/',
 		eigrp_neighbor_packet_queue_sum(ei));
 	vty_out(vty, "%-7u %-14u %-12u %-8u", 0, 0, 0, 0);
-	vty_out(vty, "%-8u %-8u \n", IF_DEF_PARAMS(ei->ifp)->v_hello,
-		IF_DEF_PARAMS(ei->ifp)->v_wait);
+	vty_out(vty, "%-8u %-8u \n", ei->params.v_hello,
+		ei->params.v_wait);
 }
 
 void show_ip_eigrp_interface_detail(struct vty *vty, struct eigrp *eigrp,
@@ -289,20 +289,23 @@ void show_ip_eigrp_topology_header(struct vty *vty, struct eigrp *eigrp)
 void show_ip_eigrp_prefix_entry(struct vty *vty, struct eigrp_prefix_entry *tn)
 {
 	struct list *successors = eigrp_topology_get_successor(tn);
+	char buffer[PREFIX_STRLEN];
 
 	vty_out(vty, "%-3c", (tn->state > 0) ? 'A' : 'P');
 
-	vty_out(vty, "%s/%u, ", inet_ntoa(tn->destination_ipv4->prefix),
-		tn->destination_ipv4->prefixlen);
-	vty_out(vty, "%u successors, ", successors->count);
+	vty_out(vty, "%s, ",
+		prefix2str(tn->destination, buffer, PREFIX_STRLEN));
+	vty_out(vty, "%u successors, ",
+		(successors) ? successors->count : 0);
 	vty_out(vty, "FD is %u, serno: %" PRIu64 " \n", tn->fdistance,
 		tn->serno);
 
-	list_delete(successors);
+	if (successors)
+		list_delete_and_null(&successors);
 }
 
-void show_ip_eigrp_neighbor_entry(struct vty *vty, struct eigrp *eigrp,
-				  struct eigrp_neighbor_entry *te, int *first)
+void show_ip_eigrp_nexthop_entry(struct vty *vty, struct eigrp *eigrp,
+				  struct eigrp_nexthop_entry *te, int *first)
 {
 	if (te->reported_distance == EIGRP_MAX_METRIC)
 		return;
@@ -323,12 +326,12 @@ void show_ip_eigrp_neighbor_entry(struct vty *vty, struct eigrp *eigrp,
 }
 
 
-DEFUN (show_debugging_eigrp,
-       show_debugging_eigrp_cmd,
-       "show debugging eigrp",
-       SHOW_STR
-       DEBUG_STR
-       EIGRP_STR)
+DEFUN_NOSH (show_debugging_eigrp,
+	    show_debugging_eigrp_cmd,
+	    "show debugging [eigrp]",
+	    SHOW_STR
+	    DEBUG_STR
+	    EIGRP_STR)
 {
 	int i;
 

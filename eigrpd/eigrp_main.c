@@ -100,6 +100,8 @@ static void sigint(void)
 {
 	zlog_notice("Terminating on signal");
 	eigrp_terminate();
+
+	exit(0);
 }
 
 /* SIGUSR1 handler. */
@@ -158,6 +160,8 @@ int main(int argc, char **argv, char **envp)
 			break;
 		}
 	}
+
+	eigrp_sw_version_initialize();
 
 	/* EIGRP master init. */
 	eigrp_master_init();

@@ -122,6 +122,14 @@ const char *prefix_list_name(struct prefix_list *plist)
 	return plist->name;
 }
 
+afi_t prefix_list_afi(struct prefix_list *plist)
+{
+	if (plist->master == &prefix_master_ipv4
+	    || plist->master == &prefix_master_orf_v4)
+		return AFI_IP;
+	return AFI_IP6;
+}
+
 /* Lookup prefix_list from list of prefix_list by name. */
 static struct prefix_list *prefix_list_lookup_do(afi_t afi, int orf,
 						 const char *name)
@@ -651,6 +659,9 @@ static int prefix_list_entry_match(struct prefix_list_entry *pentry,
 {
 	int ret;
 
+	if (pentry->prefix.family != p->family)
+		return 0;
+
 	ret = prefix_match(&pentry->prefix, p);
 	if (!ret)
 		return 0;
@@ -671,7 +682,9 @@ static int prefix_list_entry_match(struct prefix_list_entry *pentry,
 	return 1;
 }
 
-enum prefix_list_type prefix_list_apply(struct prefix_list *plist, void *object)
+enum prefix_list_type prefix_list_apply_which_prefix(struct prefix_list *plist,
+						     struct prefix **which,
+						     void *object)
 {
 	struct prefix_list_entry *pentry, *pbest = NULL;
 
@@ -681,11 +694,17 @@ enum prefix_list_type prefix_list_apply(struct prefix_list *plist, void *object)
 	size_t validbits = p->prefixlen;
 	struct pltrie_table *table;
 
-	if (plist == NULL)
+	if (plist == NULL) {
+		if (which)
+			*which = NULL;
 		return PREFIX_DENY;
+	}
 
-	if (plist->count == 0)
+	if (plist->count == 0) {
+		if (which)
+			*which = NULL;
 		return PREFIX_PERMIT;
+	}
 
 	depth = plist->master->trie_depth;
 	table = plist->trie;
@@ -719,6 +738,13 @@ enum prefix_list_type prefix_list_apply(struct prefix_list *plist, void *object)
 				pbest = pentry;
 		}
 		break;
+	}
+
+	if (which) {
+		if (pbest)
+			*which = &pbest->prefix;
+		else
+			*which = NULL;
 	}
 
 	if (pbest == NULL)
@@ -907,7 +933,7 @@ static int vty_prefix_list_install(struct vty *vty, afi_t afi, const char *name,
 	if (genum && (genum <= p.prefixlen))
 		return vty_invalid_prefix_range(vty, prefix);
 
-	if (lenum && (lenum <= p.prefixlen))
+	if (lenum && (lenum < p.prefixlen))
 		return vty_invalid_prefix_range(vty, prefix);
 
 	if (lenum && (genum > lenum))
@@ -1203,9 +1229,11 @@ static int vty_show_prefix_list_prefix(struct vty *vty, afi_t afi,
 			if (prefix_same(&p, &pentry->prefix))
 				match = 1;
 
-		if (type == longer_display)
-			if (prefix_match(&p, &pentry->prefix))
+		if (type == longer_display) {
+			if ((p.family == pentry->prefix.family) &&
+			    (prefix_match(&p, &pentry->prefix)))
 				match = 1;
+		}
 
 		if (match) {
 			vty_out(vty, "   seq %u %s ", pentry->seq,
@@ -1282,7 +1310,8 @@ static int vty_clear_prefix_list(struct vty *vty, afi_t afi, const char *name,
 
 		for (pentry = plist->head; pentry; pentry = pentry->next) {
 			if (prefix) {
-				if (prefix_match(&pentry->prefix, &p))
+				if (pentry->prefix.family == p.family &&
+				    prefix_match(&pentry->prefix, &p))
 					pentry->hitcnt = 0;
 			} else
 				pentry->hitcnt = 0;
@@ -1292,7 +1321,7 @@ static int vty_clear_prefix_list(struct vty *vty, afi_t afi, const char *name,
 }
 
 #ifndef VTYSH_EXTRACT_PL
-#include "plist_clippy.c"
+#include "lib/plist_clippy.c"
 #endif
 
 DEFPY (ip_prefix_list,

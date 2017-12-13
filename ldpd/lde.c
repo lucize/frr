@@ -77,7 +77,7 @@ struct thread_master *master;
 /* lde privileges */
 static zebra_capabilities_t _caps_p [] =
 {
-	/* none */
+	ZCAP_NET_ADMIN
 };
 
 static struct zebra_privs_t lde_privs =
@@ -185,11 +185,14 @@ lde_shutdown(void)
 	if (iev_ldpe) {
 		msgbuf_clear(&iev_ldpe->ibuf.w);
 		close(iev_ldpe->ibuf.fd);
+		iev_ldpe->ibuf.fd = -1;
 	}
 	msgbuf_clear(&iev_main->ibuf.w);
 	close(iev_main->ibuf.fd);
+	iev_main->ibuf.fd = -1;
 	msgbuf_clear(&iev_main_sync->ibuf.w);
 	close(iev_main_sync->ibuf.fd);
+	iev_main_sync->ibuf.fd = -1;
 
 	lde_gc_stop_timer();
 	lde_nbr_clear();
@@ -210,12 +213,16 @@ lde_shutdown(void)
 int
 lde_imsg_compose_parent(int type, pid_t pid, void *data, uint16_t datalen)
 {
+	if (iev_main->ibuf.fd == -1)
+		return (0);
 	return (imsg_compose_event(iev_main, type, 0, pid, -1, data, datalen));
 }
 
 void
 lde_imsg_compose_parent_sync(int type, pid_t pid, void *data, uint16_t datalen)
 {
+	if (iev_main_sync->ibuf.fd == -1)
+		return;
 	imsg_compose_event(iev_main_sync, type, 0, pid, -1, data, datalen);
 	imsg_flush(&iev_main_sync->ibuf);
 }
@@ -224,6 +231,8 @@ int
 lde_imsg_compose_ldpe(int type, uint32_t peerid, pid_t pid, void *data,
     uint16_t datalen)
 {
+	if (iev_ldpe->ibuf.fd == -1)
+		return (0);
 	return (imsg_compose_event(iev_ldpe, type, peerid, pid,
 	     -1, data, datalen));
 }
@@ -429,7 +438,7 @@ lde_dispatch_parent(struct thread *thread)
 	struct imsg		 imsg;
 	struct kif		*kif;
 	struct kroute		*kr;
-	int			 fd = THREAD_FD(thread);
+	int			 fd;
 	struct imsgev		*iev = THREAD_ARG(thread);
 	struct imsgbuf		*ibuf = &iev->ibuf;
 	ssize_t			 n;
@@ -758,11 +767,12 @@ lde_send_change_klabel(struct fec_node *fn, struct fec_nh *fnh)
 		    sizeof(kr));
 		break;
 	case FEC_TYPE_PWID:
-		if (fn->local_label == NO_LABEL ||
+		pw = (struct l2vpn_pw *) fn->data;
+		if (!pw || fn->local_label == NO_LABEL ||
 		    fnh->remote_label == NO_LABEL)
 			return;
 
-		pw = (struct l2vpn_pw *) fn->data;
+		pw->enabled = true;
 		pw2zpw(pw, &zpw);
 		zpw.local_label = fn->local_label;
 		zpw.remote_label = fnh->remote_label;
@@ -809,6 +819,10 @@ lde_send_delete_klabel(struct fec_node *fn, struct fec_nh *fnh)
 		break;
 	case FEC_TYPE_PWID:
 		pw = (struct l2vpn_pw *) fn->data;
+		if (!pw)
+			return;
+
+		pw->enabled = false;
 		pw2zpw(pw, &zpw);
 		zpw.local_label = fn->local_label;
 		zpw.remote_label = fnh->remote_label;
@@ -1609,11 +1623,12 @@ static void
 zclient_sync_init(u_short instance)
 {
 	/* Initialize special zclient for synchronous message exchanges. */
-	log_debug("Initializing synchronous zclient for label manager");
-	zclient_sync = zclient_new(master);
+	zclient_sync = zclient_new_notify(master, &zclient_options_default);
 	zclient_sync->sock = -1;
 	zclient_sync->redist_default = ZEBRA_ROUTE_LDP;
 	zclient_sync->instance = instance;
+	zclient_sync->privs = &lde_privs;
+
 	while (zclient_socket_connect(zclient_sync) < 0) {
 		log_warnx("Error connecting synchronous zclient!");
 		sleep(1);
@@ -1640,7 +1655,7 @@ lde_get_label_chunk(void)
 	int		 ret;
 	uint32_t	 start, end;
 
-	log_debug("Getting label chunk");
+	debug_labels("getting label chunk (size %u)", CHUNK_SIZE);
 	ret = lm_get_label_chunk(zclient_sync, 0, CHUNK_SIZE, &start, &end);
 	if (ret < 0) {
 		log_warnx("Error getting label chunk!");
@@ -1670,7 +1685,7 @@ on_get_label_chunk_response(uint32_t start, uint32_t end)
 {
 	struct label_chunk *new_label_chunk;
 
-	log_debug("Label Chunk assign: %u - %u", start, end);
+	debug_labels("label chunk assign: %u - %u", start, end);
 
 	new_label_chunk = calloc(1, sizeof(struct label_chunk));
 	if (!new_label_chunk) {
@@ -1693,7 +1708,8 @@ static uint32_t
 lde_get_next_label(void)
 {
 	struct label_chunk	*label_chunk;
-	uint32_t		 i, pos, size;
+	uint32_t		 i, size;
+	uint64_t		 pos;
 	uint32_t		 label = NO_LABEL;
 
 	while (current_label_chunk) {

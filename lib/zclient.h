@@ -21,7 +21,7 @@
 #ifndef _ZEBRA_ZCLIENT_H
 #define _ZEBRA_ZCLIENT_H
 
-/* For struct zapi_ipv{4,6}. */
+/* For struct zapi_route. */
 #include "prefix.h"
 
 /* For struct interface and struct connected. */
@@ -59,6 +59,9 @@ typedef enum {
 	ZEBRA_INTERFACE_UP,
 	ZEBRA_INTERFACE_DOWN,
 	ZEBRA_INTERFACE_SET_MASTER,
+	ZEBRA_ROUTE_ADD,
+	ZEBRA_ROUTE_DELETE,
+	ZEBRA_ROUTE_NOTIFY_OWNER,
 	ZEBRA_IPV4_ROUTE_ADD,
 	ZEBRA_IPV4_ROUTE_DELETE,
 	ZEBRA_IPV6_ROUTE_ADD,
@@ -85,10 +88,8 @@ typedef enum {
 	ZEBRA_BFD_DEST_DEREGISTER,
 	ZEBRA_BFD_DEST_UPDATE,
 	ZEBRA_BFD_DEST_REPLAY,
-	ZEBRA_REDISTRIBUTE_IPV4_ADD,
-	ZEBRA_REDISTRIBUTE_IPV4_DEL,
-	ZEBRA_REDISTRIBUTE_IPV6_ADD,
-	ZEBRA_REDISTRIBUTE_IPV6_DEL,
+	ZEBRA_REDISTRIBUTE_ROUTE_ADD,
+	ZEBRA_REDISTRIBUTE_ROUTE_DEL,
 	ZEBRA_VRF_UNREGISTER,
 	ZEBRA_VRF_ADD,
 	ZEBRA_VRF_DELETE,
@@ -100,10 +101,6 @@ typedef enum {
 	ZEBRA_INTERFACE_LINK_PARAMS,
 	ZEBRA_MPLS_LABELS_ADD,
 	ZEBRA_MPLS_LABELS_DELETE,
-	ZEBRA_IPV4_NEXTHOP_ADD,
-	ZEBRA_IPV4_NEXTHOP_DELETE,
-	ZEBRA_IPV6_NEXTHOP_ADD,
-	ZEBRA_IPV6_NEXTHOP_DELETE,
 	ZEBRA_IPMR_ROUTE_STATS,
 	ZEBRA_LABEL_MANAGER_CONNECT,
 	ZEBRA_GET_LABEL_CHUNK,
@@ -138,12 +135,14 @@ struct zclient {
 	/* The thread master we schedule ourselves on */
 	struct thread_master *master;
 
+	/* Priviledges to change socket values */
+	struct zebra_privs_t *privs;
+
+	/* Do we care about failure events for route install? */
+	bool receive_notify;
+
 	/* Socket to zebra daemon. */
 	int sock;
-
-	/* Flag of communication to zebra is enabled or not.  Default is on.
-	   This flag is disabled by `no router zebra' statement. */
-	int enable;
 
 	/* Connection failure count. */
 	int fail;
@@ -194,31 +193,28 @@ struct zclient {
 	int (*nexthop_update)(int, struct zclient *, uint16_t, vrf_id_t);
 	int (*import_check_update)(int, struct zclient *, uint16_t, vrf_id_t);
 	int (*bfd_dest_replay)(int, struct zclient *, uint16_t, vrf_id_t);
-	int (*redistribute_route_ipv4_add)(int, struct zclient *, uint16_t,
-					   vrf_id_t);
-	int (*redistribute_route_ipv4_del)(int, struct zclient *, uint16_t,
-					   vrf_id_t);
-	int (*redistribute_route_ipv6_add)(int, struct zclient *, uint16_t,
-					   vrf_id_t);
-	int (*redistribute_route_ipv6_del)(int, struct zclient *, uint16_t,
-					   vrf_id_t);
+	int (*redistribute_route_add)(int, struct zclient *, uint16_t,
+				      vrf_id_t);
+	int (*redistribute_route_del)(int, struct zclient *, uint16_t,
+				      vrf_id_t);
 	int (*fec_update)(int, struct zclient *, uint16_t);
 	int (*local_vni_add)(int, struct zclient *, uint16_t, vrf_id_t);
 	int (*local_vni_del)(int, struct zclient *, uint16_t, vrf_id_t);
 	int (*local_macip_add)(int, struct zclient *, uint16_t, vrf_id_t);
 	int (*local_macip_del)(int, struct zclient *, uint16_t, vrf_id_t);
 	int (*pw_status_update)(int, struct zclient *, uint16_t, vrf_id_t);
+	int (*notify_owner)(int command, struct zclient *zclient,
+			    uint16_t length, vrf_id_t vrf_id);
 };
 
 /* Zebra API message flag. */
 #define ZAPI_MESSAGE_NEXTHOP  0x01
-#define ZAPI_MESSAGE_IFINDEX  0x02
-#define ZAPI_MESSAGE_DISTANCE 0x04
-#define ZAPI_MESSAGE_METRIC   0x08
-#define ZAPI_MESSAGE_TAG      0x10
-#define ZAPI_MESSAGE_MTU      0x20
-#define ZAPI_MESSAGE_SRCPFX   0x40
-#define ZAPI_MESSAGE_LABEL    0x80
+#define ZAPI_MESSAGE_DISTANCE 0x02
+#define ZAPI_MESSAGE_METRIC   0x04
+#define ZAPI_MESSAGE_TAG      0x08
+#define ZAPI_MESSAGE_MTU      0x10
+#define ZAPI_MESSAGE_SRCPFX   0x20
+#define ZAPI_MESSAGE_LABEL    0x40
 
 /* Zserv protocol message header */
 struct zserv_header {
@@ -232,6 +228,26 @@ struct zserv_header {
 	uint16_t command;
 };
 
+struct zapi_nexthop {
+	enum nexthop_types_t type;
+	ifindex_t ifindex;
+	union {
+		union g_addr gate;
+		enum blackhole_type bh_type;
+	};
+
+	/* MPLS labels for BGP-LU or Segment Routing */
+	uint8_t label_num;
+	mpls_label_t labels[MPLS_MAX_LABELS];
+};
+
+/*
+ * Some of these data structures do not map easily to
+ * a actual data structure size giving different compilers
+ * and systems.  For those data structures we need
+ * to use the smallest available stream_getX/putX functions
+ * to encode/decode.
+ */
 struct zapi_route {
 	u_char type;
 	u_short instance;
@@ -240,10 +256,17 @@ struct zapi_route {
 
 	u_char message;
 
+	/*
+	 * This is an enum but we are going to treat it as a uint8_t
+	 * for purpose of encoding/decoding
+	 */
 	safi_t safi;
 
-	u_char nexthop_num;
-	struct nexthop **nexthop;
+	struct prefix prefix;
+	struct prefix_ipv6 src_prefix;
+
+	u_int16_t nexthop_num;
+	struct zapi_nexthop nexthops[MULTIPATH_NUM];
 
 	u_char distance;
 
@@ -306,13 +329,36 @@ struct zapi_pw_status {
 	uint32_t status;
 };
 
+enum zapi_route_notify_owner {
+	ZAPI_ROUTE_FAIL_INSTALL,
+	ZAPI_ROUTE_BETTER_ADMIN_WON,
+	ZAPI_ROUTE_INSTALLED,
+};
+
 /* Zebra MAC types */
 #define ZEBRA_MAC_TYPE_STICKY                0x01 /* Sticky MAC*/
 #define ZEBRA_MAC_TYPE_GW                    0x02 /* gateway (SVI) mac*/
 
+struct zclient_options {
+	bool receive_notify;
+};
+
 /* Prototypes of zebra client service functions. */
 extern struct zclient *zclient_new(struct thread_master *);
-extern void zclient_init(struct zclient *, int, u_short);
+
+#if CONFDATE > 20181101
+CPP_NOTICE("zclient_new_notify can take over or zclient_new now");
+#endif
+
+extern struct zclient_options zclient_options_default;
+
+extern struct zclient *zclient_new_notify(struct thread_master *m,
+					  struct zclient_options *opt);
+
+#define zclient_new(A) zclient_new_notify((A), &zclient_options_default); \
+	CPP_WARN("Please transition to using zclient_new_notify");
+
+extern void zclient_init(struct zclient *, int, u_short, struct zebra_privs_t *privs);
 extern int zclient_start(struct zclient *);
 extern void zclient_stop(struct zclient *);
 extern void zclient_reset(struct zclient *);
@@ -369,7 +415,7 @@ extern struct interface *zebra_interface_vrf_update_read(struct stream *s,
 extern void zebra_interface_if_set_value(struct stream *, struct interface *);
 extern void zebra_router_id_update_read(struct stream *s, struct prefix *rid);
 extern int zapi_ipv4_route(u_char, struct zclient *, struct prefix_ipv4 *,
-			   struct zapi_ipv4 *);
+			   struct zapi_ipv4 *) __attribute__((deprecated));
 
 extern struct interface *zebra_interface_link_params_read(struct stream *);
 extern size_t zebra_interface_link_params_write(struct stream *,
@@ -420,11 +466,25 @@ struct zapi_ipv6 {
 
 extern int zapi_ipv6_route(u_char cmd, struct zclient *zclient,
 			   struct prefix_ipv6 *p, struct prefix_ipv6 *src_p,
-			   struct zapi_ipv6 *api);
+			   struct zapi_ipv6 *api) __attribute__((deprecated));
 extern int zapi_ipv4_route_ipv6_nexthop(u_char, struct zclient *,
 					struct prefix_ipv4 *,
-					struct zapi_ipv6 *);
-extern int zapi_route(u_char cmd, struct zclient *zclient, struct prefix *p,
-		      struct prefix_ipv6 *src_p, struct zapi_route *api);
+					struct zapi_ipv6 *)
+	__attribute__((deprecated));
+extern int zclient_route_send(u_char, struct zclient *, struct zapi_route *);
+extern int zapi_route_encode(u_char, struct stream *, struct zapi_route *);
+extern int zapi_route_decode(struct stream *, struct zapi_route *);
+bool zapi_route_notify_decode(struct stream *s, struct prefix *p,
+			      enum zapi_route_notify_owner *note);
+
+static inline void zapi_route_set_blackhole(struct zapi_route *api,
+					    enum blackhole_type bh_type)
+{
+	api->nexthop_num = 1;
+	api->nexthops[0].type = NEXTHOP_TYPE_BLACKHOLE;
+	api->nexthops[0].bh_type = bh_type;
+	SET_FLAG(api->message, ZAPI_MESSAGE_NEXTHOP);
+};
+
 
 #endif /* _ZEBRA_ZCLIENT_H */
