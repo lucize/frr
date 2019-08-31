@@ -70,7 +70,7 @@ int
 send_packet(int fd, int af, union ldpd_addr *dst, struct iface_af *ia,
     void *pkt, size_t len)
 {
-	struct sockaddr		*sa;
+	union sockunion su;
 
 	switch (af) {
 	case AF_INET:
@@ -97,10 +97,10 @@ send_packet(int fd, int af, union ldpd_addr *dst, struct iface_af *ia,
 		fatalx("send_packet: unknown af");
 	}
 
-	sa = addr2sa(af, dst, LDP_PORT);
-	if (sendto(fd, pkt, len, 0, sa, sockaddr_len(sa)) == -1) {
+	addr2sa(af, dst, LDP_PORT, &su);
+	if (sendto(fd, pkt, len, 0, &su.sa, sockaddr_len(&su.sa)) == -1) {
 		log_warn("%s: error sending packet to %s", __func__,
-		    log_sockaddr(sa));
+			 log_sockaddr(&su.sa));
 		return (-1);
 	}
 
@@ -144,7 +144,7 @@ disc_recv_packet(struct thread *thread)
 
 	/* reschedule read */
 	*threadp = NULL;
-	thread_add_read(master, disc_recv_packet, threadp, fd, &*threadp);
+	thread_add_read(master, disc_recv_packet, threadp, fd, threadp);
 
 	/* setup buffer */
 	memset(&m, 0, sizeof(m));
@@ -618,12 +618,17 @@ session_read(struct thread *thread)
 			len -= msg_size;
 		}
 		free(buf);
+		buf = NULL;
 		if (len != 0) {
 			session_shutdown(nbr, S_BAD_PDU_LEN, 0, 0);
 			return (0);
 		}
 	}
 
+	/* shouldn't happen, session_get_pdu should be > 0 if buf was
+	 * allocated - but let's get rid of the SA warning.
+	 */
+	free(buf);
 	return (0);
 }
 

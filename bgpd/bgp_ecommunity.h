@@ -21,16 +21,33 @@
 #ifndef _QUAGGA_BGP_ECOMMUNITY_H
 #define _QUAGGA_BGP_ECOMMUNITY_H
 
+#include "bgpd/bgp_route.h"
+#include "bgpd/bgpd.h"
+
 /* High-order octet of the Extended Communities type field.  */
 #define ECOMMUNITY_ENCODE_AS                0x00
 #define ECOMMUNITY_ENCODE_IP                0x01
 #define ECOMMUNITY_ENCODE_AS4               0x02
 #define ECOMMUNITY_ENCODE_OPAQUE            0x03
 #define ECOMMUNITY_ENCODE_EVPN              0x06
+#define ECOMMUNITY_ENCODE_TRANS_EXP         0x80 /* Flow Spec */
+#define ECOMMUNITY_ENCODE_REDIRECT_IP_NH    0x08 /* Flow Spec */
+/* RFC7674 */
+#define ECOMMUNITY_EXTENDED_COMMUNITY_PART_2 0x81
+#define ECOMMUNITY_EXTENDED_COMMUNITY_PART_3 0x82
 
 /* Low-order octet of the Extended Communities type field.  */
 #define ECOMMUNITY_ROUTE_TARGET             0x02
 #define ECOMMUNITY_SITE_ORIGIN              0x03
+#define ECOMMUNITY_TRAFFIC_RATE             0x06 /* Flow Spec */
+#define ECOMMUNITY_TRAFFIC_ACTION           0x07
+#define ECOMMUNITY_REDIRECT_VRF             0x08
+#define ECOMMUNITY_TRAFFIC_MARKING          0x09
+#define ECOMMUNITY_REDIRECT_IP_NH           0x00
+/* from IANA: bgp-extended-communities/bgp-extended-communities.xhtml
+ * 0x0c Flow-spec Redirect to IPv4 - draft-ietf-idr-flowspec-redirect
+ */
+#define ECOMMUNITY_FLOWSPEC_REDIRECT_IPV4   0x0c
 
 /* Low-order octet of the Extended Communities type field for EVPN types */
 #define ECOMMUNITY_EVPN_SUBTYPE_MACMOBILITY  0x00
@@ -38,8 +55,11 @@
 #define ECOMMUNITY_EVPN_SUBTYPE_ES_IMPORT_RT 0x02
 #define ECOMMUNITY_EVPN_SUBTYPE_ROUTERMAC    0x03
 #define ECOMMUNITY_EVPN_SUBTYPE_DEF_GW       0x0d
+#define ECOMMUNITY_EVPN_SUBTYPE_ND           0x08
 
 #define ECOMMUNITY_EVPN_SUBTYPE_MACMOBILITY_FLAG_STICKY 0x01
+#define ECOMMUNITY_EVPN_SUBTYPE_ND_ROUTER_FLAG		0x01
+#define ECOMMUNITY_EVPN_SUBTYPE_ND_OVERRIDE_FLAG	0x02
 
 /* Low-order octet of the Extended Communities type field for OPAQUE types */
 #define ECOMMUNITY_OPAQUE_SUBTYPE_ENCAP     0x0c
@@ -53,7 +73,7 @@
 #define ECOMMUNITY_SIZE                        8
 
 /* Extended Communities type flag.  */
-#define ECOMMUNITY_FLAG_NON_TRANSITIVE      0x40  
+#define ECOMMUNITY_FLAG_NON_TRANSITIVE      0x40
 
 /* Extended Communities attribute.  */
 struct ecommunity {
@@ -64,7 +84,7 @@ struct ecommunity {
 	int size;
 
 	/* Extended Communities value.  */
-	u_int8_t *val;
+	uint8_t *val;
 
 	/* Human readable format string.  */
 	char *str;
@@ -90,7 +110,7 @@ struct ecommunity_val {
 /*
  * Encode BGP Route Target AS:nn.
  */
-static inline void encode_route_target_as(as_t as, u_int32_t val,
+static inline void encode_route_target_as(as_t as, uint32_t val,
 					  struct ecommunity_val *eval)
 {
 	eval->val[0] = ECOMMUNITY_ENCODE_AS;
@@ -106,7 +126,7 @@ static inline void encode_route_target_as(as_t as, u_int32_t val,
 /*
  * Encode BGP Route Target IP:nn.
  */
-static inline void encode_route_target_ip(struct in_addr ip, u_int16_t val,
+static inline void encode_route_target_ip(struct in_addr ip, uint16_t val,
 					  struct ecommunity_val *eval)
 {
 	eval->val[0] = ECOMMUNITY_ENCODE_IP;
@@ -119,7 +139,7 @@ static inline void encode_route_target_ip(struct in_addr ip, u_int16_t val,
 /*
  * Encode BGP Route Target AS4:nn.
  */
-static inline void encode_route_target_as4(as_t as, u_int16_t val,
+static inline void encode_route_target_as4(as_t as, uint16_t val,
 					   struct ecommunity_val *eval)
 {
 	eval->val[0] = ECOMMUNITY_ENCODE_AS4;
@@ -135,17 +155,18 @@ static inline void encode_route_target_as4(as_t as, u_int16_t val,
 extern void ecommunity_init(void);
 extern void ecommunity_finish(void);
 extern void ecommunity_free(struct ecommunity **);
-extern struct ecommunity *ecommunity_parse(u_int8_t *, u_short);
+extern struct ecommunity *ecommunity_parse(uint8_t *, unsigned short);
 extern struct ecommunity *ecommunity_dup(struct ecommunity *);
 extern struct ecommunity *ecommunity_merge(struct ecommunity *,
 					   struct ecommunity *);
 extern struct ecommunity *ecommunity_uniq_sort(struct ecommunity *);
 extern struct ecommunity *ecommunity_intern(struct ecommunity *);
-extern int ecommunity_cmp(const void *, const void *);
+extern bool ecommunity_cmp(const void *arg1, const void *arg2);
 extern void ecommunity_unintern(struct ecommunity **);
-extern unsigned int ecommunity_hash_make(void *);
+extern unsigned int ecommunity_hash_make(const void *);
 extern struct ecommunity *ecommunity_str2com(const char *, int, int);
 extern char *ecommunity_ecom2str(struct ecommunity *, int, int);
+extern void ecommunity_strfree(char **s);
 extern int ecommunity_match(const struct ecommunity *,
 			    const struct ecommunity *);
 extern char *ecommunity_str(struct ecommunity *);
@@ -160,4 +181,18 @@ extern int ecommunity_add_val(struct ecommunity *, struct ecommunity_val *);
 extern int ecommunity_strip(struct ecommunity *ecom, uint8_t type,
 			    uint8_t subtype);
 extern struct ecommunity *ecommunity_new(void);
+extern int ecommunity_del_val(struct ecommunity *ecom,
+			      struct ecommunity_val *eval);
+struct bgp_pbr_entry_action;
+extern int ecommunity_fill_pbr_action(struct ecommunity_val *ecom_eval,
+			       struct bgp_pbr_entry_action *api);
+
+extern void bgp_compute_aggregate_ecommunity(
+					struct bgp_aggregate *aggregate,
+					struct ecommunity *ecommunity);
+extern void bgp_remove_ecommunity_from_aggregate(
+					struct bgp_aggregate *aggregate,
+					struct ecommunity *ecommunity);
+extern void bgp_aggr_ecommunity_remove(void *arg);
+
 #endif /* _QUAGGA_BGP_ECOMMUNITY_H */

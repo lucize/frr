@@ -28,6 +28,7 @@
 #include "zclient.h"
 #include "memory.h"
 #include "lib/bfd.h"
+#include "lib_errors.h"
 
 #include "ospf6_proto.h"
 #include "ospf6_top.h"
@@ -46,23 +47,30 @@ unsigned char conf_debug_ospf6_zebra = 0;
 /* information about zebra. */
 struct zclient *zclient = NULL;
 
-struct in_addr router_id_zebra;
-
 /* Router-id update message from zebra. */
-static int ospf6_router_id_update_zebra(int command, struct zclient *zclient,
-					zebra_size_t length, vrf_id_t vrf_id)
+static int ospf6_router_id_update_zebra(ZAPI_CALLBACK_ARGS)
 {
 	struct prefix router_id;
 	struct ospf6 *o = ospf6;
 
 	zebra_router_id_update_read(zclient->ibuf, &router_id);
-	router_id_zebra = router_id.u.prefix4;
+
+	om6->zebra_router_id = router_id.u.prefix4.s_addr;
 
 	if (o == NULL)
 		return 0;
 
-	if (o->router_id == 0)
-		o->router_id = (u_int32_t)router_id_zebra.s_addr;
+	o->router_id_zebra = router_id.u.prefix4;
+	if (IS_OSPF6_DEBUG_ZEBRA(RECV)) {
+		char buf[INET_ADDRSTRLEN];
+
+		zlog_debug("%s: zebra router-id %s update",
+			   __PRETTY_FUNCTION__,
+			   inet_ntop(AF_INET, &router_id.u.prefix4,
+				     buf, INET_ADDRSTRLEN));
+	}
+
+	ospf6_router_id_update();
 
 	return 0;
 }
@@ -90,8 +98,7 @@ void ospf6_zebra_no_redistribute(int type)
 }
 
 /* Inteface addition message from zebra. */
-static int ospf6_zebra_if_add(int command, struct zclient *zclient,
-			      zebra_size_t length, vrf_id_t vrf_id)
+static int ospf6_zebra_if_add(ZAPI_CALLBACK_ARGS)
 {
 	struct interface *ifp;
 
@@ -103,8 +110,7 @@ static int ospf6_zebra_if_add(int command, struct zclient *zclient,
 	return 0;
 }
 
-static int ospf6_zebra_if_del(int command, struct zclient *zclient,
-			      zebra_size_t length, vrf_id_t vrf_id)
+static int ospf6_zebra_if_del(ZAPI_CALLBACK_ARGS)
 {
 	struct interface *ifp;
 
@@ -119,19 +125,11 @@ static int ospf6_zebra_if_del(int command, struct zclient *zclient,
 		zlog_debug("Zebra Interface delete: %s index %d mtu %d",
 			   ifp->name, ifp->ifindex, ifp->mtu6);
 
-#if 0
-  /* XXX: ospf6_interface_if_del is not the right way to handle this,
-   * because among other thinkable issues, it will also clear all
-   * settings as they are contained in the struct ospf6_interface. */
-  ospf6_interface_if_del (ifp);
-#endif /*0*/
-
 	if_set_index(ifp, IFINDEX_INTERNAL);
 	return 0;
 }
 
-static int ospf6_zebra_if_state_update(int command, struct zclient *zclient,
-				       zebra_size_t length, vrf_id_t vrf_id)
+static int ospf6_zebra_if_state_update(ZAPI_CALLBACK_ARGS)
 {
 	struct interface *ifp;
 
@@ -150,10 +148,7 @@ static int ospf6_zebra_if_state_update(int command, struct zclient *zclient,
 	return 0;
 }
 
-static int ospf6_zebra_if_address_update_add(int command,
-					     struct zclient *zclient,
-					     zebra_size_t length,
-					     vrf_id_t vrf_id)
+static int ospf6_zebra_if_address_update_add(ZAPI_CALLBACK_ARGS)
 {
 	struct connected *c;
 	char buf[128];
@@ -177,10 +172,7 @@ static int ospf6_zebra_if_address_update_add(int command,
 	return 0;
 }
 
-static int ospf6_zebra_if_address_update_delete(int command,
-						struct zclient *zclient,
-						zebra_size_t length,
-						vrf_id_t vrf_id)
+static int ospf6_zebra_if_address_update_delete(ZAPI_CALLBACK_ARGS)
 {
 	struct connected *c;
 	char buf[128];
@@ -207,8 +199,7 @@ static int ospf6_zebra_if_address_update_delete(int command,
 	return 0;
 }
 
-static int ospf6_zebra_read_route(int command, struct zclient *zclient,
-				  zebra_size_t length, vrf_id_t vrf_id)
+static int ospf6_zebra_read_route(ZAPI_CALLBACK_ARGS)
 {
 	struct zapi_route api;
 	unsigned long ifindex;
@@ -224,6 +215,9 @@ static int ospf6_zebra_read_route(int command, struct zclient *zclient,
 	if (CHECK_FLAG(api.message, ZAPI_MESSAGE_SRCPFX))
 		return 0;
 
+	if (IN6_IS_ADDR_LINKLOCAL(&api.prefix.u.prefix6))
+		return 0;
+
 	ifindex = api.nexthops[0].ifindex;
 	nexthop = &api.nexthops[0].gate.ipv6;
 
@@ -235,13 +229,13 @@ static int ospf6_zebra_read_route(int command, struct zclient *zclient,
 
 		zlog_debug(
 			"Zebra Receive route %s: %s %s nexthop %s ifindex %ld tag %" ROUTE_TAG_PRI,
-			(command == ZEBRA_REDISTRIBUTE_ROUTE_ADD ? "add"
-								 : "delete"),
+			(cmd == ZEBRA_REDISTRIBUTE_ROUTE_ADD ? "add"
+							     : "delete"),
 			zebra_route_string(api.type), prefixstr, nexthopstr,
 			ifindex, api.tag);
 	}
 
-	if (command == ZEBRA_REDISTRIBUTE_ROUTE_ADD)
+	if (cmd == ZEBRA_REDISTRIBUTE_ROUTE_ADD)
 		ospf6_asbr_redistribute_add(api.type, ifindex, &api.prefix,
 					    api.nexthop_num, nexthop, api.tag);
 	else
@@ -264,10 +258,11 @@ DEFUN (show_zebra,
 		return CMD_SUCCESS;
 	}
 
-	vty_out(vty, "Zebra Infomation\n");
+	vty_out(vty, "Zebra Information\n");
 	vty_out(vty, "  fail: %d\n", zclient->fail);
 	vty_out(vty, "  redistribute default: %d\n",
-		vrf_bitmap_check(zclient->default_information, VRF_DEFAULT));
+		vrf_bitmap_check(zclient->default_information[AFI_IP6],
+				 VRF_DEFAULT));
 	vty_out(vty, "  redistribute:");
 	for (i = 0; i < ZEBRA_ROUTE_MAX; i++) {
 		if (vrf_bitmap_check(zclient->redist[AFI_IP6][i], VRF_DEFAULT))
@@ -361,7 +356,8 @@ static void ospf6_zebra_route_update(int type, struct ospf6_route *request)
 		ret = zclient_route_send(ZEBRA_ROUTE_ADD, zclient, &api);
 
 	if (ret < 0)
-		zlog_err("zclient_route_send() %s failed: %s",
+		flog_err(EC_LIB_ZAPI_SOCKET,
+			 "zclient_route_send() %s failed: %s",
 			 (type == REM ? "delete" : "add"),
 			 safe_strerror(errno));
 
@@ -460,7 +456,7 @@ int ospf6_distance_set(struct vty *vty, struct ospf6 *o,
 {
 	int ret;
 	struct prefix_ipv6 p;
-	u_char distance;
+	uint8_t distance;
 	struct route_node *rn;
 	struct ospf6_distance *odistance;
 
@@ -545,7 +541,7 @@ void ospf6_distance_reset(struct ospf6 *o)
 		}
 }
 
-u_char ospf6_distance_apply(struct prefix_ipv6 *p, struct ospf6_route * or)
+uint8_t ospf6_distance_apply(struct prefix_ipv6 *p, struct ospf6_route * or)
 {
 	struct ospf6 *o;
 
@@ -575,7 +571,7 @@ u_char ospf6_distance_apply(struct prefix_ipv6 *p, struct ospf6_route * or)
 static void ospf6_zebra_connected(struct zclient *zclient)
 {
 	/* Send the client registration */
-	bfd_client_sendmsg(zclient, ZEBRA_BFD_CLIENT_REGISTER);
+	bfd_client_sendmsg(zclient, ZEBRA_BFD_CLIENT_REGISTER, VRF_DEFAULT);
 
 	zclient_send_reg_requests(zclient, VRF_DEFAULT);
 }
@@ -583,7 +579,7 @@ static void ospf6_zebra_connected(struct zclient *zclient)
 void ospf6_zebra_init(struct thread_master *master)
 {
 	/* Allocate zebra structure. */
-	zclient = zclient_new_notify(master, &zclient_options_default);
+	zclient = zclient_new(master, &zclient_options_default);
 	zclient_init(zclient, ZEBRA_ROUTE_OSPF6, 0, &ospf6d_privs);
 	zclient->zebra_connected = ospf6_zebra_connected;
 	zclient->router_id_update = ospf6_router_id_update_zebra;

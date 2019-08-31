@@ -1,6 +1,6 @@
 /*
- * Utilities and interfaces for managing POSIX threads
- * Copyright (C) 2017  Cumulus Networks
+ * Utilities and interfaces for managing POSIX threads within FRR.
+ * Copyright (C) 2017  Cumulus Networks, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,83 +19,86 @@
 
 #include <zebra.h>
 #include <pthread.h>
+#ifdef HAVE_PTHREAD_NP_H
+#include <pthread_np.h>
+#endif
+#include <sched.h>
 
 #include "frr_pthread.h"
 #include "memory.h"
-#include "hash.h"
+#include "linklist.h"
 
-DEFINE_MTYPE_STATIC(LIB, FRR_PTHREAD, "FRR POSIX Thread");
+DEFINE_MTYPE_STATIC(LIB, FRR_PTHREAD, "FRR POSIX Thread")
+DEFINE_MTYPE_STATIC(LIB, PTHREAD_PRIM, "POSIX sync primitives")
 
-static unsigned int next_id = 0;
+/* default frr_pthread start/stop routine prototypes */
+static void *fpt_run(void *arg);
+static int fpt_halt(struct frr_pthread *fpt, void **res);
 
-/* Hash table of all frr_pthreads along with synchronization primitive(s) and
- * hash table callbacks.
- * ------------------------------------------------------------------------ */
-static struct hash *pthread_table;
-static pthread_mutex_t pthread_table_mtx = PTHREAD_MUTEX_INITIALIZER;
+/* default frr_pthread attributes */
+struct frr_pthread_attr frr_pthread_attr_default = {
+	.start = fpt_run,
+	.stop = fpt_halt,
+};
 
-/* pthread_table->hash_cmp */
-static int pthread_table_hash_cmp(const void *value1, const void *value2)
-{
-	const struct frr_pthread *tq1 = value1;
-	const struct frr_pthread *tq2 = value2;
+/* list to keep track of all frr_pthreads */
+static pthread_mutex_t frr_pthread_list_mtx = PTHREAD_MUTEX_INITIALIZER;
+static struct list *frr_pthread_list;
 
-	return (tq1->id == tq2->id);
-}
-
-/* pthread_table->hash_key */
-static unsigned int pthread_table_hash_key(void *value)
-{
-	return ((struct frr_pthread *)value)->id;
-}
 /* ------------------------------------------------------------------------ */
 
-void frr_pthread_init()
+void frr_pthread_init(void)
 {
-	pthread_mutex_lock(&pthread_table_mtx);
+	pthread_mutex_lock(&frr_pthread_list_mtx);
 	{
-		pthread_table = hash_create(pthread_table_hash_key,
-					    pthread_table_hash_cmp, NULL);
+		frr_pthread_list = list_new();
+		frr_pthread_list->del = (void (*)(void *))&frr_pthread_destroy;
 	}
-	pthread_mutex_unlock(&pthread_table_mtx);
+	pthread_mutex_unlock(&frr_pthread_list_mtx);
 }
 
-void frr_pthread_finish()
+void frr_pthread_finish(void)
 {
-	pthread_mutex_lock(&pthread_table_mtx);
+	pthread_mutex_lock(&frr_pthread_list_mtx);
 	{
-		hash_clean(pthread_table,
-			   (void (*)(void *))frr_pthread_destroy);
-		hash_free(pthread_table);
+		list_delete(&frr_pthread_list);
 	}
-	pthread_mutex_unlock(&pthread_table_mtx);
+	pthread_mutex_unlock(&frr_pthread_list_mtx);
 }
 
-struct frr_pthread *frr_pthread_new(const char *name, unsigned int id,
-				    void *(*start_routine)(void *),
-				    int (*stop_routine)(void **,
-							struct frr_pthread *))
+struct frr_pthread *frr_pthread_new(struct frr_pthread_attr *attr,
+				    const char *name, const char *os_name)
 {
-	static struct frr_pthread holder = {0};
 	struct frr_pthread *fpt = NULL;
 
-	pthread_mutex_lock(&pthread_table_mtx);
+	attr = attr ? attr : &frr_pthread_attr_default;
+
+	fpt = XCALLOC(MTYPE_FRR_PTHREAD, sizeof(struct frr_pthread));
+	/* initialize mutex */
+	pthread_mutex_init(&fpt->mtx, NULL);
+	/* create new thread master */
+	fpt->master = thread_master_create(name);
+	/* set attributes */
+	fpt->attr = *attr;
+	name = (name ? name : "Anonymous thread");
+	fpt->name = XSTRDUP(MTYPE_FRR_PTHREAD, name);
+	if (os_name)
+		strlcpy(fpt->os_name, os_name, OS_THREAD_NAMELEN);
+	else
+		strlcpy(fpt->os_name, name, OS_THREAD_NAMELEN);
+	/* initialize startup synchronization primitives */
+	fpt->running_cond_mtx = XCALLOC(
+		MTYPE_PTHREAD_PRIM, sizeof(pthread_mutex_t));
+	fpt->running_cond = XCALLOC(MTYPE_PTHREAD_PRIM,
+				    sizeof(pthread_cond_t));
+	pthread_mutex_init(fpt->running_cond_mtx, NULL);
+	pthread_cond_init(fpt->running_cond, NULL);
+
+	pthread_mutex_lock(&frr_pthread_list_mtx);
 	{
-		holder.id = id;
-
-		if (!hash_lookup(pthread_table, &holder)) {
-			struct frr_pthread *fpt = XCALLOC(
-				MTYPE_FRR_PTHREAD, sizeof(struct frr_pthread));
-			fpt->id = id;
-			fpt->master = thread_master_create(name);
-			fpt->start_routine = start_routine;
-			fpt->stop_routine = stop_routine;
-			fpt->name = XSTRDUP(MTYPE_FRR_PTHREAD, name);
-
-			hash_get(pthread_table, fpt, hash_alloc_intern);
-		}
+		listnode_add(frr_pthread_list, fpt);
 	}
-	pthread_mutex_unlock(&pthread_table_mtx);
+	pthread_mutex_unlock(&frr_pthread_list_mtx);
 
 	return fpt;
 }
@@ -103,82 +106,182 @@ struct frr_pthread *frr_pthread_new(const char *name, unsigned int id,
 void frr_pthread_destroy(struct frr_pthread *fpt)
 {
 	thread_master_free(fpt->master);
+
+	pthread_mutex_destroy(&fpt->mtx);
+	pthread_mutex_destroy(fpt->running_cond_mtx);
+	pthread_cond_destroy(fpt->running_cond);
 	XFREE(MTYPE_FRR_PTHREAD, fpt->name);
+	XFREE(MTYPE_PTHREAD_PRIM, fpt->running_cond_mtx);
+	XFREE(MTYPE_PTHREAD_PRIM, fpt->running_cond);
 	XFREE(MTYPE_FRR_PTHREAD, fpt);
 }
 
-struct frr_pthread *frr_pthread_get(unsigned int id)
+int frr_pthread_set_name(struct frr_pthread *fpt)
 {
-	static struct frr_pthread holder = {0};
-	struct frr_pthread *fpt;
+	int ret = 0;
 
-	pthread_mutex_lock(&pthread_table_mtx);
-	{
-		holder.id = id;
-		fpt = hash_lookup(pthread_table, &holder);
-	}
-	pthread_mutex_unlock(&pthread_table_mtx);
-
-	return fpt;
-}
-
-int frr_pthread_run(unsigned int id, const pthread_attr_t *attr, void *arg)
-{
-	struct frr_pthread *fpt = frr_pthread_get(id);
-	int ret;
-
-	if (!fpt)
-		return -1;
-
-	ret = pthread_create(&fpt->thread, attr, fpt->start_routine, arg);
-
-	/* Per pthread_create(3), the contents of fpt->thread are undefined if
-	 * pthread_create() did not succeed. Reset this value to zero. */
-	if (ret < 0)
-		memset(&fpt->thread, 0x00, sizeof(fpt->thread));
+#ifdef HAVE_PTHREAD_SETNAME_NP
+# ifdef GNU_LINUX
+	ret = pthread_setname_np(fpt->thread, fpt->os_name);
+# elif defined(__NetBSD__)
+	ret = pthread_setname_np(fpt->thread, fpt->os_name, NULL);
+# endif
+#elif defined(HAVE_PTHREAD_SET_NAME_NP)
+	pthread_set_name_np(fpt->thread, fpt->os_name);
+#endif
 
 	return ret;
 }
 
-/**
- * Calls the stop routine for the frr_pthread and resets any relevant fields.
- *
- * @param fpt - the frr_pthread to stop
- * @param result - pointer to result pointer
- * @return the return code from the stop routine
- */
-static int frr_pthread_stop_actual(struct frr_pthread *fpt, void **result)
+static void *frr_pthread_inner(void *arg)
 {
-	int ret = (*fpt->stop_routine)(result, fpt);
+	struct frr_pthread *fpt = arg;
+
+	rcu_thread_start(fpt->rcu_thread);
+	return fpt->attr.start(fpt);
+}
+
+int frr_pthread_run(struct frr_pthread *fpt, const pthread_attr_t *attr)
+{
+	int ret;
+
+	fpt->rcu_thread = rcu_thread_prepare();
+	ret = pthread_create(&fpt->thread, attr, frr_pthread_inner, fpt);
+
+	/*
+	 * Per pthread_create(3), the contents of fpt->thread are undefined if
+	 * pthread_create() did not succeed. Reset this value to zero.
+	 */
+	if (ret < 0) {
+		rcu_thread_unprepare(fpt->rcu_thread);
+		memset(&fpt->thread, 0x00, sizeof(fpt->thread));
+	}
+
+	return ret;
+}
+
+void frr_pthread_wait_running(struct frr_pthread *fpt)
+{
+	pthread_mutex_lock(fpt->running_cond_mtx);
+	{
+		while (!fpt->running)
+			pthread_cond_wait(fpt->running_cond,
+					  fpt->running_cond_mtx);
+	}
+	pthread_mutex_unlock(fpt->running_cond_mtx);
+}
+
+void frr_pthread_notify_running(struct frr_pthread *fpt)
+{
+	pthread_mutex_lock(fpt->running_cond_mtx);
+	{
+		fpt->running = true;
+		pthread_cond_signal(fpt->running_cond);
+	}
+	pthread_mutex_unlock(fpt->running_cond_mtx);
+}
+
+int frr_pthread_stop(struct frr_pthread *fpt, void **result)
+{
+	int ret = (*fpt->attr.stop)(fpt, result);
 	memset(&fpt->thread, 0x00, sizeof(fpt->thread));
 	return ret;
 }
 
-int frr_pthread_stop(unsigned int id, void **result)
+void frr_pthread_stop_all(void)
 {
-	struct frr_pthread *fpt = frr_pthread_get(id);
-	return frr_pthread_stop_actual(fpt, result);
-}
-
-/**
- * Callback for hash_iterate to stop all frr_pthread's.
- */
-static void frr_pthread_stop_all_iter(struct hash_backet *hb, void *arg)
-{
-	struct frr_pthread *fpt = hb->data;
-	frr_pthread_stop_actual(fpt, NULL);
-}
-
-void frr_pthread_stop_all()
-{
-	pthread_mutex_lock(&pthread_table_mtx);
+	pthread_mutex_lock(&frr_pthread_list_mtx);
 	{
-		hash_iterate(pthread_table, frr_pthread_stop_all_iter, NULL);
+		struct listnode *n;
+		struct frr_pthread *fpt;
+		for (ALL_LIST_ELEMENTS_RO(frr_pthread_list, n, fpt))
+			frr_pthread_stop(fpt, NULL);
 	}
-	pthread_mutex_unlock(&pthread_table_mtx);
+	pthread_mutex_unlock(&frr_pthread_list_mtx);
 }
 
-unsigned int frr_pthread_get_id()
+/*
+ * ----------------------------------------------------------------------------
+ * Default Event Loop
+ * ----------------------------------------------------------------------------
+ */
+
+/* dummy task for sleeper pipe */
+static int fpt_dummy(struct thread *thread)
 {
-	return next_id++;
+	return 0;
+}
+
+/* poison pill task to end event loop */
+static int fpt_finish(struct thread *thread)
+{
+	struct frr_pthread *fpt = THREAD_ARG(thread);
+
+	atomic_store_explicit(&fpt->running, false, memory_order_relaxed);
+	return 0;
+}
+
+/* stop function, called from other threads to halt this one */
+static int fpt_halt(struct frr_pthread *fpt, void **res)
+{
+	thread_add_event(fpt->master, &fpt_finish, fpt, 0, NULL);
+	pthread_join(fpt->thread, res);
+
+	return 0;
+}
+
+/*
+ * Entry pthread function & main event loop.
+ *
+ * Upon thread start the following actions occur:
+ *
+ * - frr_pthread's owner field is set to pthread ID.
+ * - All signals are blocked (except for unblockable signals).
+ * - Pthread's threadmaster is set to never handle pending signals
+ * - Poker pipe for poll() is created and queued as I/O source
+ * - The frr_pthread->running_cond condition variable is signalled to indicate
+ *   that the previous actions have completed. It is not safe to assume any of
+ *   the above have occurred before receiving this signal.
+ *
+ * After initialization is completed, the event loop begins running. Each tick,
+ * the following actions are performed before running the usual event system
+ * tick function:
+ *
+ * - Verify that the running boolean is set
+ * - Verify that there are no pending cancellation requests
+ * - Verify that there are tasks scheduled
+ *
+ * So long as the conditions are met, the event loop tick is run and the
+ * returned task is executed.
+ *
+ * If any of these conditions are not met, the event loop exits, closes the
+ * pipes and dies without running any cleanup functions.
+ */
+static void *fpt_run(void *arg)
+{
+	struct frr_pthread *fpt = arg;
+	fpt->master->owner = pthread_self();
+
+	int sleeper[2];
+	pipe(sleeper);
+	thread_add_read(fpt->master, &fpt_dummy, NULL, sleeper[0], NULL);
+
+	fpt->master->handle_signals = false;
+
+	frr_pthread_set_name(fpt);
+
+	frr_pthread_notify_running(fpt);
+
+	struct thread task;
+	while (atomic_load_explicit(&fpt->running, memory_order_relaxed)) {
+		pthread_testcancel();
+		if (thread_fetch(fpt->master, &task)) {
+			thread_call(&task);
+		}
+	}
+
+	close(sleeper[1]);
+	close(sleeper[0]);
+
+	return NULL;
 }

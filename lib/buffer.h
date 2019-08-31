@@ -22,6 +22,10 @@
 #ifndef _ZEBRA_BUFFER_H
 #define _ZEBRA_BUFFER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Create a new buffer.  Memory will be allocated in chunks of the given
    size.  If the argument is 0, the library will supply a reasonable
    default size suitable for buffering socket I/O. */
@@ -37,7 +41,7 @@ extern void buffer_free(struct buffer *);
 /* Add the given data to the end of the buffer. */
 extern void buffer_put(struct buffer *, const void *, size_t);
 /* Add a single character to the end of the buffer. */
-extern void buffer_putc(struct buffer *, u_char);
+extern void buffer_putc(struct buffer *, uint8_t);
 /* Add a NUL-terminated string to the end of the buffer. */
 extern void buffer_putstr(struct buffer *, const char *);
 /* Add given data, inline-expanding \n to \r\n */
@@ -98,5 +102,9 @@ extern buffer_status_t buffer_flush_all(struct buffer *, int fd);
 */
 extern buffer_status_t buffer_flush_window(struct buffer *, int fd, int width,
 					   int height, int erase, int no_more);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ZEBRA_BUFFER_H */

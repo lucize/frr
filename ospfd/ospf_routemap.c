@@ -32,6 +32,7 @@
 #include "log.h"
 #include "plist.h"
 #include "vrf.h"
+#include "frrstr.h"
 
 #include "ospfd/ospfd.h"
 #include "ospfd/ospf_asbr.h"
@@ -39,6 +40,7 @@
 #include "ospfd/ospf_lsa.h"
 #include "ospfd/ospf_route.h"
 #include "ospfd/ospf_zebra.h"
+#include "ospfd/ospf_errors.h"
 
 /* Hook function for updating route_map assignment. */
 static void ospf_route_map_update(const char *name)
@@ -68,23 +70,34 @@ static void ospf_route_map_update(const char *name)
 					/* Keep old route-map. */
 					struct route_map *old = ROUTEMAP(red);
 
-					/* Update route-map. */
-					ROUTEMAP(red) = route_map_lookup_by_name(
-										 ROUTEMAP_NAME(red));
+					if (!old) {
+						/* Route-map creation */
+						/* Update route-map. */
+						ROUTEMAP(red) =
+							route_map_lookup_by_name(
+								ROUTEMAP_NAME(red));
 
-					/* No update for this distribute type. */
-					if (old == NULL && ROUTEMAP(red) == NULL)
+							route_map_counter_increment(
+								ROUTEMAP(red));
+					} else {
+						/* Route-map deletion */
+						ROUTEMAP(red) = NULL;
+					}
+					/* No update for this distribute type.
+					 */
+					if (old == NULL
+					    && ROUTEMAP(red) == NULL)
 						continue;
 
-					ospf_distribute_list_update(ospf, type,
-								    red->instance);
+					ospf_distribute_list_update(
+						ospf, type, red->instance);
 				}
 			}
 		}
 	}
 }
 
-static void ospf_route_map_event(route_map_event_t event, const char *name)
+static void ospf_route_map_event(const char *name)
 {
 	struct ospf *ospf;
 	int type;
@@ -103,8 +116,8 @@ static void ospf_route_map_event(route_map_event_t event, const char *name)
 			for (ALL_LIST_ELEMENTS_RO(red_list, node, red)) {
 				if (ROUTEMAP_NAME(red) && ROUTEMAP(red)
 				    && !strcmp(ROUTEMAP_NAME(red), name)) {
-					ospf_distribute_list_update(ospf, type,
-								red->instance);
+					ospf_distribute_list_update(
+						ospf, type, red->instance);
 				}
 			}
 		}
@@ -113,10 +126,9 @@ static void ospf_route_map_event(route_map_event_t event, const char *name)
 
 /* `match ip netxthop ' */
 /* Match function return 1 if match is success else return zero. */
-static route_map_result_t route_match_ip_nexthop(void *rule,
-						 struct prefix *prefix,
-						 route_map_object_t type,
-						 void *object)
+static enum route_map_cmd_result_t
+route_match_ip_nexthop(void *rule, const struct prefix *prefix,
+		       route_map_object_t type, void *object)
 {
 	struct access_list *alist;
 	struct external_info *ei = object;
@@ -158,8 +170,8 @@ struct route_map_rule_cmd route_match_ip_nexthop_cmd = {
 
 /* `match ip next-hop prefix-list PREFIX_LIST' */
 
-static route_map_result_t
-route_match_ip_next_hop_prefix_list(void *rule, struct prefix *prefix,
+static enum route_map_cmd_result_t
+route_match_ip_next_hop_prefix_list(void *rule, const struct prefix *prefix,
 				    route_map_object_t type, void *object)
 {
 	struct prefix_list *plist;
@@ -197,13 +209,46 @@ struct route_map_rule_cmd route_match_ip_next_hop_prefix_list_cmd = {
 	route_match_ip_next_hop_prefix_list_compile,
 	route_match_ip_next_hop_prefix_list_free};
 
+/* `match ip next-hop type <blackhole>' */
+
+static enum route_map_cmd_result_t
+route_match_ip_next_hop_type(void *rule, const struct prefix *prefix,
+			     route_map_object_t type, void *object)
+{
+	struct external_info *ei = object;
+
+	if (type == RMAP_OSPF && prefix->family == AF_INET) {
+		ei = (struct external_info *)object;
+		if (!ei)
+			return RMAP_NOMATCH;
+
+		if (ei->nexthop.s_addr == INADDR_ANY && !ei->ifindex)
+			return RMAP_MATCH;
+	}
+	return RMAP_NOMATCH;
+}
+
+static void *route_match_ip_next_hop_type_compile(const char *arg)
+{
+	return XSTRDUP(MTYPE_ROUTE_MAP_COMPILED, arg);
+}
+
+static void route_match_ip_next_hop_type_free(void *rule)
+{
+	XFREE(MTYPE_ROUTE_MAP_COMPILED, rule);
+}
+
+static struct route_map_rule_cmd route_match_ip_next_hop_type_cmd = {
+	"ip next-hop type", route_match_ip_next_hop_type,
+	route_match_ip_next_hop_type_compile,
+	route_match_ip_next_hop_type_free};
+
 /* `match ip address IP_ACCESS_LIST' */
 /* Match function should return 1 if match is success else return
    zero. */
-static route_map_result_t route_match_ip_address(void *rule,
-						 struct prefix *prefix,
-						 route_map_object_t type,
-						 void *object)
+static enum route_map_cmd_result_t
+route_match_ip_address(void *rule, const struct prefix *prefix,
+		       route_map_object_t type, void *object)
 {
 	struct access_list *alist;
 	/* struct prefix_ipv4 match; */
@@ -239,8 +284,8 @@ struct route_map_rule_cmd route_match_ip_address_cmd = {
 	route_match_ip_address_free};
 
 /* `match ip address prefix-list PREFIX_LIST' */
-static route_map_result_t
-route_match_ip_address_prefix_list(void *rule, struct prefix *prefix,
+static enum route_map_cmd_result_t
+route_match_ip_address_prefix_list(void *rule, const struct prefix *prefix,
 				   route_map_object_t type, void *object)
 {
 	struct prefix_list *plist;
@@ -275,10 +320,9 @@ struct route_map_rule_cmd route_match_ip_address_prefix_list_cmd = {
 /* `match interface IFNAME' */
 /* Match function should return 1 if match is success else return
    zero. */
-static route_map_result_t route_match_interface(void *rule,
-						struct prefix *prefix,
-						route_map_object_t type,
-						void *object)
+static enum route_map_cmd_result_t
+route_match_interface(void *rule, const struct prefix *prefix,
+		      route_map_object_t type, void *object)
 {
 	struct interface *ifp;
 	struct external_info *ei;
@@ -314,8 +358,9 @@ struct route_map_rule_cmd route_match_interface_cmd = {
 	route_match_interface_free};
 
 /* Match function return 1 if match is success else return zero. */
-static route_map_result_t route_match_tag(void *rule, struct prefix *prefix,
-					  route_map_object_t type, void *object)
+static enum route_map_cmd_result_t
+route_match_tag(void *rule, const struct prefix *prefix,
+		route_map_object_t type, void *object)
 {
 	route_tag_t *tag;
 	struct external_info *ei;
@@ -337,15 +382,16 @@ static struct route_map_rule_cmd route_match_tag_cmd = {
 };
 
 struct ospf_metric {
+	enum { metric_increment, metric_decrement, metric_absolute } type;
 	bool used;
-	u_int32_t metric;
+	uint32_t metric;
 };
 
 /* `set metric METRIC' */
 /* Set metric to attribute. */
-static route_map_result_t route_set_metric(void *rule, struct prefix *prefix,
-					   route_map_object_t type,
-					   void *object)
+static enum route_map_cmd_result_t
+route_set_metric(void *rule, const struct prefix *prefix,
+		 route_map_object_t type, void *object)
 {
 	struct ospf_metric *metric;
 	struct external_info *ei;
@@ -356,8 +402,20 @@ static route_map_result_t route_set_metric(void *rule, struct prefix *prefix,
 		ei = object;
 
 		/* Set metric out value. */
-		if (metric->used)
+		if (!metric->used)
+			return RMAP_OKAY;
+
+		ei->route_map_set.metric = DEFAULT_DEFAULT_METRIC;
+
+		if (metric->type == metric_increment)
+			ei->route_map_set.metric += metric->metric;
+		else if (metric->type == metric_decrement)
+			ei->route_map_set.metric -= metric->metric;
+		else if (metric->type == metric_absolute)
 			ei->route_map_set.metric = metric->metric;
+
+		if (ei->route_map_set.metric > OSPF_LS_INFINITY)
+			ei->route_map_set.metric = OSPF_LS_INFINITY;
 	}
 	return RMAP_OKAY;
 }
@@ -367,26 +425,32 @@ static void *route_set_metric_compile(const char *arg)
 {
 	struct ospf_metric *metric;
 
-	metric = XCALLOC(MTYPE_ROUTE_MAP_COMPILED, sizeof(u_int32_t));
+	metric = XCALLOC(MTYPE_ROUTE_MAP_COMPILED, sizeof(uint32_t));
 	metric->used = false;
 
-	/* OSPF doesn't support the +/- in
-	   set metric <+/-metric> check
-	   Ignore the +/- component */
-	if (!all_digit(arg)) {
-		if ((arg[0] == '+' || arg[0] == '-') && all_digit(arg + 1)) {
-			zlog_warn("OSPF does not support 'set metric +/-'");
-			arg++;
-		} else {
-			if (strmatch(arg, "+rtt") || strmatch(arg, "-rtt"))
-				zlog_warn(
-					"OSPF does not support 'set metric +rtt / -rtt'");
+	if (all_digit(arg))
+		metric->type = metric_absolute;
 
-			return metric;
-		}
+	if (strmatch(arg, "+rtt") || strmatch(arg, "-rtt")) {
+		flog_warn(EC_OSPF_SET_METRIC_PLUS,
+			  "OSPF does not support 'set metric +rtt / -rtt'");
+		return metric;
 	}
+
+	if ((arg[0] == '+') && all_digit(arg + 1)) {
+		metric->type = metric_increment;
+		arg++;
+	}
+
+	if ((arg[0] == '-') && all_digit(arg + 1)) {
+		metric->type = metric_decrement;
+		arg++;
+	}
+
 	metric->metric = strtoul(arg, NULL, 10);
-	metric->used = true;
+
+	if (metric->metric)
+		metric->used = true;
 
 	return metric;
 }
@@ -405,12 +469,11 @@ struct route_map_rule_cmd route_set_metric_cmd = {
 
 /* `set metric-type TYPE' */
 /* Set metric-type to attribute. */
-static route_map_result_t route_set_metric_type(void *rule,
-						struct prefix *prefix,
-						route_map_object_t type,
-						void *object)
+static enum route_map_cmd_result_t
+route_set_metric_type(void *rule, const struct prefix *prefix,
+		      route_map_object_t type, void *object)
 {
-	u_int32_t *metric_type;
+	uint32_t *metric_type;
 	struct external_info *ei;
 
 	if (type == RMAP_OSPF) {
@@ -427,9 +490,9 @@ static route_map_result_t route_set_metric_type(void *rule,
 /* set metric-type compilation. */
 static void *route_set_metric_type_compile(const char *arg)
 {
-	u_int32_t *metric_type;
+	uint32_t *metric_type;
 
-	metric_type = XCALLOC(MTYPE_ROUTE_MAP_COMPILED, sizeof(u_int32_t));
+	metric_type = XCALLOC(MTYPE_ROUTE_MAP_COMPILED, sizeof(uint32_t));
 	if (strcmp(arg, "type-1") == 0)
 		*metric_type = EXTERNAL_METRIC_TYPE_1;
 	else if (strcmp(arg, "type-2") == 0)
@@ -455,8 +518,9 @@ struct route_map_rule_cmd route_set_metric_type_cmd = {
 	route_set_metric_type_free,
 };
 
-static route_map_result_t route_set_tag(void *rule, struct prefix *prefix,
-					route_map_object_t type, void *object)
+static enum route_map_cmd_result_t
+route_set_tag(void *rule, const struct prefix *prefix, route_map_object_t type,
+	      void *object)
 {
 	route_tag_t *tag;
 	struct external_info *ei;
@@ -532,6 +596,9 @@ void ospf_route_map_init(void)
 	route_map_match_ip_next_hop_prefix_list_hook(generic_match_add);
 	route_map_no_match_ip_next_hop_prefix_list_hook(generic_match_delete);
 
+	route_map_match_ip_next_hop_type_hook(generic_match_add);
+	route_map_no_match_ip_next_hop_type_hook(generic_match_delete);
+
 	route_map_match_tag_hook(generic_match_add);
 	route_map_no_match_tag_hook(generic_match_delete);
 
@@ -545,6 +612,7 @@ void ospf_route_map_init(void)
 	route_map_install_match(&route_match_ip_next_hop_prefix_list_cmd);
 	route_map_install_match(&route_match_ip_address_cmd);
 	route_map_install_match(&route_match_ip_address_prefix_list_cmd);
+	route_map_install_match(&route_match_ip_next_hop_type_cmd);
 	route_map_install_match(&route_match_interface_cmd);
 	route_map_install_match(&route_match_tag_cmd);
 

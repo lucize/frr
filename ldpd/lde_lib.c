@@ -129,7 +129,9 @@ fec_clear(struct fec_tree *fh, void (*free_cb)(void *))
 {
 	struct fec	*f;
 
-	while ((f = RB_ROOT(fec_tree, fh)) != NULL) {
+	while (!RB_EMPTY(fec_tree, fh)) {
+		f = RB_ROOT(fec_tree, fh);
+
 		fec_remove(fh, f);
 		free_cb(f);
 	}
@@ -916,6 +918,9 @@ lde_gc_timer(struct thread *thread)
 		    !RB_EMPTY(lde_map_head, &fn->downstream) ||
 		    !RB_EMPTY(lde_map_head, &fn->upstream))
 			continue;
+
+		if (fn->local_label != NO_LABEL)
+			lde_free_label(fn->local_label);
 
 		fec_remove(&ft, &fn->fec);
 		free(fn);

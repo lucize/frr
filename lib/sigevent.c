@@ -22,8 +22,8 @@
 #include <sigevent.h>
 #include <log.h>
 #include <memory.h>
+#include <lib_errors.h>
 
-#ifdef SA_SIGINFO
 #ifdef HAVE_UCONTEXT_H
 #ifdef GNU_LINUX
 /* get REG_EIP from ucontext.h */
@@ -33,11 +33,10 @@
 #endif /* GNU_LINUX */
 #include <ucontext.h>
 #endif /* HAVE_UCONTEXT_H */
-#endif /* SA_SIGINFO */
 
 
 /* master signals descriptor struct */
-struct quagga_sigevent_master_t {
+static struct quagga_sigevent_master_t {
 	struct thread *t;
 
 	struct quagga_signal_t *signals;
@@ -83,7 +82,8 @@ int quagga_sigevent_process(void)
 	sigdelset(&newmask, SIGKILL);
 
 	if ((sigprocmask(SIG_BLOCK, &newmask, &oldmask)) < 0) {
-		zlog_err("quagga_signal_timer: couldnt block signals!");
+		flog_err_sys(EC_LIB_SYSTEM_CALL,
+			     "quagga_signal_timer: couldnt block signals!");
 		return -1;
 	}
 #endif /* SIGEVENT_BLOCK_SIGNALS */
@@ -119,8 +119,6 @@ int quagga_sigevent_process(void)
 int quagga_signal_timer(struct thread *t)
 {
 	struct quagga_sigevent_master_t *sigm;
-	struct quagga_signal_t *sig;
-	int i;
 
 	sigm = THREAD_ARG(t);
 	sigm->t = NULL;
@@ -157,8 +155,6 @@ static int signal_set(int signo)
 	else
 		return 0;
 }
-
-#ifdef SA_SIGINFO
 
 /* XXX This function should be enhanced to support more platforms
        (it currently works only on Linux/x86). */
@@ -199,33 +195,20 @@ static void *program_counter(void *context)
 	return NULL;
 }
 
-#endif /* SA_SIGINFO */
-
 static void __attribute__((noreturn))
-exit_handler(int signo
-#ifdef SA_SIGINFO
-	     ,
-	     siginfo_t *siginfo, void *context
-#endif
-	     )
+exit_handler(int signo, siginfo_t *siginfo, void *context)
 {
-	zlog_signal(signo, "exiting..."
-#ifdef SA_SIGINFO
-		    ,
-		    siginfo, program_counter(context)
-#endif
-			    );
+	void *pc = program_counter(context);
+
+	zlog_signal(signo, "exiting...", siginfo, pc);
 	_exit(128 + signo);
 }
 
 static void __attribute__((noreturn))
-core_handler(int signo
-#ifdef SA_SIGINFO
-	     ,
-	     siginfo_t *siginfo, void *context
-#endif
-	     )
+core_handler(int signo, siginfo_t *siginfo, void *context)
 {
+	void *pc = program_counter(context);
+
 	/* make sure we don't hang in here.  default for SIGALRM is terminate.
 	 * - if we're in backtrace for more than a second, abort. */
 	struct sigaction sa_default = {.sa_handler = SIG_DFL};
@@ -238,12 +221,8 @@ core_handler(int signo
 
 	alarm(1);
 
-	zlog_signal(signo, "aborting..."
-#ifdef SA_SIGINFO
-		    ,
-		    siginfo, program_counter(context)
-#endif
-			    );
+	zlog_signal(signo, "aborting...", siginfo, pc);
+
 	/* dump memory stats on core */
 	log_memstats(stderr, "core_handler");
 	abort();
@@ -284,22 +263,17 @@ static void trap_default_signals(void)
 	};
 	static const struct {
 		const int *sigs;
-		u_int nsigs;
-		void (*handler)(int signo
-#ifdef SA_SIGINFO
-				,
-				siginfo_t *info, void *context
-#endif
-				);
+		unsigned int nsigs;
+		void (*handler)(int signo, siginfo_t *info, void *context);
 	} sigmap[] = {
 		{core_signals, array_size(core_signals), core_handler},
 		{exit_signals, array_size(exit_signals), exit_handler},
 		{ignore_signals, array_size(ignore_signals), NULL},
 	};
-	u_int i;
+	unsigned int i;
 
 	for (i = 0; i < array_size(sigmap); i++) {
-		u_int j;
+		unsigned int j;
 
 		for (j = 0; j < sigmap[i].nsigs; j++) {
 			struct sigaction oact;
@@ -311,15 +285,10 @@ static void trap_default_signals(void)
 					act.sa_handler = SIG_IGN;
 					act.sa_flags = 0;
 				} else {
-#ifdef SA_SIGINFO
 					/* Request extra arguments to signal
 					 * handler. */
 					act.sa_sigaction = sigmap[i].handler;
 					act.sa_flags = SA_SIGINFO;
-#else
-					act.sa_handler = sigmap[i].handler;
-					act.sa_flags = 0;
-#endif
 #ifdef SA_RESETHAND
 					/* don't try to print backtraces
 					 * recursively */
@@ -329,7 +298,8 @@ static void trap_default_signals(void)
 				}
 				if (sigaction(sigmap[i].sigs[j], &act, NULL)
 				    < 0)
-					zlog_warn(
+					flog_err(
+						EC_LIB_SYSTEM_CALL,
 						"Unable to set signal handler for signal %d: %s",
 						sigmap[i].sigs[j],
 						safe_strerror(errno));

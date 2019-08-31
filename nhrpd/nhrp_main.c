@@ -7,6 +7,10 @@
  * (at your option) any later version.
  */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include <unistd.h>
 
 #include "zebra.h"
@@ -23,6 +27,7 @@
 
 #include "nhrpd.h"
 #include "netlink.h"
+#include "nhrp_errors.h"
 
 DEFINE_MGROUP(NHRPD, "NHRP")
 
@@ -32,15 +37,13 @@ struct thread_master *master;
 struct timeval current_time;
 
 /* nhrpd options. */
-struct option longopts[] = {
-	{ 0 }
-};
+struct option longopts[] = {{0}};
 
 /* nhrpd privileges */
-static zebra_capabilities_t _caps_p [] = {
-	ZCAP_NET_RAW,
-	ZCAP_NET_ADMIN,
-	ZCAP_DAC_OVERRIDE,	/* for now needed to write to /proc/sys/net/ipv4/<if>/send_redirect */
+static zebra_capabilities_t _caps_p[] = {
+	ZCAP_NET_RAW, ZCAP_NET_ADMIN,
+	ZCAP_DAC_OVERRIDE, /* for now needed to write to
+			      /proc/sys/net/ipv4/<if>/send_redirect */
 };
 
 struct zebra_privs_t nhrpd_privs = {
@@ -52,7 +55,7 @@ struct zebra_privs_t nhrpd_privs = {
 	.vty_group = VTY_GROUP,
 #endif
 	.caps_p = _caps_p,
-	.cap_num_p = ZEBRA_NUM_OF(_caps_p),
+	.cap_num_p = array_size(_caps_p),
 };
 
 static void parse_arguments(int argc, char **argv)
@@ -61,7 +64,8 @@ static void parse_arguments(int argc, char **argv)
 
 	while (1) {
 		opt = frr_getopt(argc, argv, 0);
-		if(opt < 0) break;
+		if (opt < 0)
+			break;
 
 		switch (opt) {
 		case 0:
@@ -98,21 +102,32 @@ static void nhrp_request_stop(void)
 }
 
 static struct quagga_signal_t sighandlers[] = {
-	{ .signal = SIGUSR1, .handler = &nhrp_sigusr1, },
-	{ .signal = SIGINT,  .handler = &nhrp_request_stop, },
-	{ .signal = SIGTERM, .handler = &nhrp_request_stop, },
+	{
+		.signal = SIGUSR1,
+		.handler = &nhrp_sigusr1,
+	},
+	{
+		.signal = SIGINT,
+		.handler = &nhrp_request_stop,
+	},
+	{
+		.signal = SIGTERM,
+		.handler = &nhrp_request_stop,
+	},
 };
 
-FRR_DAEMON_INFO(nhrpd, NHRP,
-	.vty_port = NHRP_VTY_PORT,
+static const struct frr_yang_module_info *nhrpd_yang_modules[] = {
+	&frr_interface_info,
+};
 
-	.proghelp = "Implementation of the NHRP routing protocol.",
+FRR_DAEMON_INFO(nhrpd, NHRP, .vty_port = NHRP_VTY_PORT,
 
-	.signals = sighandlers,
-	.n_signals = array_size(sighandlers),
+		.proghelp = "Implementation of the NHRP routing protocol.",
 
-	.privs = &nhrpd_privs,
-)
+		.signals = sighandlers, .n_signals = array_size(sighandlers),
+
+		.privs = &nhrpd_privs, .yang_modules = nhrpd_yang_modules,
+		.n_yang_modules = array_size(nhrpd_yang_modules), )
 
 int main(int argc, char **argv)
 {
@@ -123,9 +138,10 @@ int main(int argc, char **argv)
 
 	/* Library inits. */
 	master = frr_init();
-	vrf_init(NULL, NULL, NULL, NULL);
+	nhrp_error_init();
+	vrf_init(NULL, NULL, NULL, NULL, NULL);
 	nhrp_interface_init();
-	resolver_init();
+	resolver_init(master);
 
 	/* Run with elevated capabilities, as for all netlink activity
 	 * we need privileges anyway. */

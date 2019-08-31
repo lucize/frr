@@ -24,10 +24,14 @@
 
 #include "log.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct zlog {
 	const char *ident; /* daemon name (first arg to openlog) */
 	const char *protoname;
-	u_short instance;
+	unsigned short instance;
 	int maxlvl[ZLOG_NUM_DESTS]; /* maximum priority to send to associated
 				       logging destination */
 	int default_lvl;	    /* maxlvl to use if none is specified */
@@ -47,6 +51,9 @@ extern const char *zlog_priority[];
 
 /* Generic function for zlog. */
 extern void vzlog(int priority, const char *format, va_list args);
-extern void zlog(int priority, const char *format, ...) PRINTF_ATTRIBUTE(2, 3);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ZEBRA_LOG_PRIVATE_H */

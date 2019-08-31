@@ -36,6 +36,8 @@
 #include "bgpd/bgp_route.h"
 #include "bgpd/bgp_attr.h"
 #include "bgpd/bgp_dump.h"
+#include "bgpd/bgp_errors.h"
+#include "bgpd/bgp_packet.h"
 
 enum bgp_dump_type {
 	BGP_DUMP_ALL,
@@ -119,7 +121,7 @@ static FILE *bgp_dump_open_file(struct bgp_dump *bgp_dump)
 		ret = strftime(realpath, MAXPATHLEN, bgp_dump->filename, tm);
 
 	if (ret == 0) {
-		zlog_warn("bgp_dump_open_file: strftime error");
+		flog_warn(EC_BGP_DUMP, "bgp_dump_open_file: strftime error");
 		return NULL;
 	}
 
@@ -131,7 +133,7 @@ static FILE *bgp_dump_open_file(struct bgp_dump *bgp_dump)
 	bgp_dump->fp = fopen(realpath, "w");
 
 	if (bgp_dump->fp == NULL) {
-		zlog_warn("bgp_dump_open_file: %s: %s", realpath,
+		flog_warn(EC_BGP_DUMP, "bgp_dump_open_file: %s: %s", realpath,
 			  strerror(errno));
 		umask(oldumask);
 		return NULL;
@@ -277,7 +279,7 @@ static void bgp_dump_routes_index_table(struct bgp *bgp)
 		if (sockunion_family(&peer->su) == AF_INET) {
 			stream_put_in_addr(obuf, &peer->su.sin.sin_addr);
 		} else if (sockunion_family(&peer->su) == AF_INET6) {
-			stream_write(obuf, (u_char *)&peer->su.sin6.sin6_addr,
+			stream_write(obuf, (uint8_t *)&peer->su.sin6.sin6_addr,
 				     IPV6_MAX_BYTELEN);
 		}
 
@@ -298,9 +300,9 @@ static void bgp_dump_routes_index_table(struct bgp *bgp)
 }
 
 
-static struct bgp_info *bgp_dump_route_node_record(int afi, struct bgp_node *rn,
-						   struct bgp_info *info,
-						   unsigned int seq)
+static struct bgp_path_info *
+bgp_dump_route_node_record(int afi, struct bgp_node *rn,
+			   struct bgp_path_info *path, unsigned int seq)
 {
 	struct stream *obuf;
 	size_t sizep;
@@ -329,12 +331,12 @@ static struct bgp_info *bgp_dump_route_node_record(int afi, struct bgp_node *rn,
 	if (afi == AFI_IP) {
 		/* We'll dump only the useful bits (those not 0), but have to
 		 * align on 8 bits */
-		stream_write(obuf, (u_char *)&rn->p.u.prefix4,
+		stream_write(obuf, (uint8_t *)&rn->p.u.prefix4,
 			     (rn->p.prefixlen + 7) / 8);
 	} else if (afi == AFI_IP6) {
 		/* We'll dump only the useful bits (those not 0), but have to
 		 * align on 8 bits */
-		stream_write(obuf, (u_char *)&rn->p.u.prefix6,
+		stream_write(obuf, (uint8_t *)&rn->p.u.prefix6,
 			     (rn->p.prefixlen + 7) / 8);
 	}
 
@@ -348,18 +350,18 @@ static struct bgp_info *bgp_dump_route_node_record(int afi, struct bgp_node *rn,
 	stream_putw(obuf, 0);
 
 	endp = stream_get_endp(obuf);
-	for (; info; info = info->next) {
+	for (; path; path = path->next) {
 		size_t cur_endp;
 
 		/* Peer index */
-		stream_putw(obuf, info->peer->table_dump_index);
+		stream_putw(obuf, path->peer->table_dump_index);
 
 		/* Originated */
-		stream_putl(obuf, time(NULL) - (bgp_clock() - info->uptime));
+		stream_putl(obuf, time(NULL) - (bgp_clock() - path->uptime));
 
 		/* Dump attribute. */
 		/* Skip prefix & AFI/SAFI for MP_NLRI */
-		bgp_dump_routes_attr(obuf, info->attr, &rn->p);
+		bgp_dump_routes_attr(obuf, path->attr, &rn->p);
 
 		cur_endp = stream_get_endp(obuf);
 		if (cur_endp > BGP_MAX_PACKET_SIZE + BGP_DUMP_MSG_HEADER
@@ -378,7 +380,7 @@ static struct bgp_info *bgp_dump_route_node_record(int afi, struct bgp_node *rn,
 	bgp_dump_set_size(obuf, MSG_TABLE_DUMP_V2);
 	fwrite(STREAM_DATA(obuf), stream_get_endp(obuf), 1, bgp_dump_routes.fp);
 
-	return info;
+	return path;
 }
 
 
@@ -386,7 +388,7 @@ static struct bgp_info *bgp_dump_route_node_record(int afi, struct bgp_node *rn,
 static unsigned int bgp_dump_routes_func(int afi, int first_run,
 					 unsigned int seq)
 {
-	struct bgp_info *info;
+	struct bgp_path_info *path;
 	struct bgp_node *rn;
 	struct bgp *bgp;
 	struct bgp_table *table;
@@ -409,9 +411,9 @@ static unsigned int bgp_dump_routes_func(int afi, int first_run,
 	table = bgp->rib[afi][SAFI_UNICAST];
 
 	for (rn = bgp_table_top(table); rn; rn = bgp_route_next(rn)) {
-		info = rn->info;
-		while (info) {
-			info = bgp_dump_route_node_record(afi, rn, info, seq);
+		path = bgp_node_get_bgp_path_info(rn);
+		while (path) {
+			path = bgp_dump_route_node_record(afi, rn, path, seq);
 			seq++;
 		}
 	}
@@ -465,7 +467,7 @@ static void bgp_dump_common(struct stream *obuf, struct peer *peer,
 	}
 
 	if (peer->su.sa.sa_family == AF_INET) {
-		stream_putw(obuf, peer->ifindex);
+		stream_putw(obuf, peer->ifp ? peer->ifp->ifindex : 0);
 		stream_putw(obuf, AFI_IP);
 
 		stream_put(obuf, &peer->su.sin.sin_addr, IPV4_MAX_BYTELEN);
@@ -477,7 +479,7 @@ static void bgp_dump_common(struct stream *obuf, struct peer *peer,
 			stream_put(obuf, empty, IPV4_MAX_BYTELEN);
 	} else if (peer->su.sa.sa_family == AF_INET6) {
 		/* Interface Index and Address family. */
-		stream_putw(obuf, peer->ifindex);
+		stream_putw(obuf, peer->ifp ? peer->ifp->ifindex : 0);
 		stream_putw(obuf, AFI_IP6);
 
 		/* Source IP Address and Destination IP Address. */
@@ -554,7 +556,8 @@ static void bgp_dump_packet_func(struct bgp_dump *bgp_dump, struct peer *peer,
 }
 
 /* Called from bgp_packet.c when BGP packet is received. */
-void bgp_dump_packet(struct peer *peer, int type, struct stream *packet)
+static int bgp_dump_packet(struct peer *peer, uint8_t type, bgp_size_t size,
+		struct stream *packet)
 {
 	/* bgp_dump_all. */
 	bgp_dump_packet_func(&bgp_dump_all, peer, packet);
@@ -562,6 +565,7 @@ void bgp_dump_packet(struct peer *peer, int type, struct stream *packet)
 	/* bgp_dump_updates. */
 	if (type == BGP_MSG_UPDATE)
 		bgp_dump_packet_func(&bgp_dump_updates, peer, packet);
+	return 0;
 }
 
 static unsigned int bgp_dump_parse_time(const char *str)
@@ -580,7 +584,7 @@ static unsigned int bgp_dump_parse_time(const char *str)
 	len = strlen(str);
 
 	for (i = 0; i < len; i++) {
-		if (isdigit((int)str[i])) {
+		if (isdigit((unsigned char)str[i])) {
 			time *= 10;
 			time += str[i] - '0';
 		} else if (str[i] == 'H' || str[i] == 'h') {
@@ -861,6 +865,8 @@ void bgp_dump_init(void)
 
 	install_element(CONFIG_NODE, &dump_bgp_all_cmd);
 	install_element(CONFIG_NODE, &no_dump_bgp_all_cmd);
+
+	hook_register(bgp_packet_dump, bgp_dump_packet);
 }
 
 void bgp_dump_finish(void)
@@ -871,4 +877,5 @@ void bgp_dump_finish(void)
 
 	stream_free(bgp_dump_obuf);
 	bgp_dump_obuf = NULL;
+	hook_unregister(bgp_packet_dump, bgp_dump_packet);
 }

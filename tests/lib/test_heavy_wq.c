@@ -60,18 +60,10 @@ static void heavy_wq_add(struct vty *vty, const char *str, int i)
 {
 	struct heavy_wq_node *hn;
 
-	if ((hn = XCALLOC(MTYPE_WQ_NODE, sizeof(struct heavy_wq_node)))
-	    == NULL) {
-		zlog_err("%s: unable to allocate hn", __func__);
-		return;
-	}
+	hn = XCALLOC(MTYPE_WQ_NODE, sizeof(struct heavy_wq_node));
 
 	hn->i = i;
-	if (!(hn->str = XSTRDUP(MTYPE_WQ_NODE_STR, str))) {
-		zlog_err("%s: unable to xstrdup", __func__);
-		XFREE(MTYPE_WQ_NODE, hn);
-		return;
-	}
+	hn->str = XSTRDUP(MTYPE_WQ_NODE_STR, str);
 
 	work_queue_add(heavy_wq, hn);
 
@@ -147,12 +139,9 @@ DEFUN (clear_foo,
 	return CMD_SUCCESS;
 }
 
-static int heavy_wq_init()
+static int heavy_wq_init(void)
 {
-	if (!(heavy_wq = work_queue_new(master, "heavy_work_queue"))) {
-		zlog_err("%s: could not get new work queue!", __func__);
-		return -1;
-	}
+	heavy_wq = work_queue_new(master, "heavy_work_queue");
 
 	heavy_wq->spec.workfunc = &slow_func;
 	heavy_wq->spec.errorfunc = &slow_func_err;
@@ -163,7 +152,7 @@ static int heavy_wq_init()
 	return 0;
 }
 
-void test_init()
+void test_init(void)
 {
 	install_element(VIEW_NODE, &clear_foo_cmd);
 	heavy_wq_init();

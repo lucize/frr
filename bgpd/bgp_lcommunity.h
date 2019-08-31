@@ -21,10 +21,8 @@
 #ifndef _QUAGGA_BGP_LCOMMUNITY_H
 #define _QUAGGA_BGP_LCOMMUNITY_H
 
-/* Extended communities attribute string format.  */
-#define LCOMMUNITY_FORMAT_ROUTE_MAP            0
-#define LCOMMUNITY_FORMAT_COMMUNITY_LIST       1
-#define LCOMMUNITY_FORMAT_DISPLAY              2
+#include "lib/json.h"
+#include "bgpd/bgp_route.h"
 
 /* Large Communities value is twelve octets long.  */
 #define LCOMMUNITY_SIZE                        12
@@ -38,7 +36,10 @@ struct lcommunity {
 	int size;
 
 	/* Large Communities value.  */
-	u_int8_t *val;
+	uint8_t *val;
+
+	/* Large Communities as a json object */
+	json_object *json;
 
 	/* Human readable format string.  */
 	char *str;
@@ -54,21 +55,29 @@ struct lcommunity_val {
 extern void lcommunity_init(void);
 extern void lcommunity_finish(void);
 extern void lcommunity_free(struct lcommunity **);
-extern struct lcommunity *lcommunity_parse(u_int8_t *, u_short);
+extern struct lcommunity *lcommunity_parse(uint8_t *, unsigned short);
 extern struct lcommunity *lcommunity_dup(struct lcommunity *);
 extern struct lcommunity *lcommunity_merge(struct lcommunity *,
 					   struct lcommunity *);
 extern struct lcommunity *lcommunity_uniq_sort(struct lcommunity *);
 extern struct lcommunity *lcommunity_intern(struct lcommunity *);
-extern int lcommunity_cmp(const void *, const void *);
+extern bool lcommunity_cmp(const void *arg1, const void *arg2);
 extern void lcommunity_unintern(struct lcommunity **);
-extern unsigned int lcommunity_hash_make(void *);
+extern unsigned int lcommunity_hash_make(const void *);
 extern struct hash *lcommunity_hash(void);
 extern struct lcommunity *lcommunity_str2com(const char *);
-extern char *lcommunity_lcom2str(struct lcommunity *, int);
 extern int lcommunity_match(const struct lcommunity *,
 			    const struct lcommunity *);
-extern char *lcommunity_str(struct lcommunity *);
-extern int lcommunity_include(struct lcommunity *lcom, u_char *ptr);
-extern void lcommunity_del_val(struct lcommunity *lcom, u_char *ptr);
+extern char *lcommunity_str(struct lcommunity *, bool make_json);
+extern int lcommunity_include(struct lcommunity *lcom, uint8_t *ptr);
+extern void lcommunity_del_val(struct lcommunity *lcom, uint8_t *ptr);
+
+extern void bgp_compute_aggregate_lcommunity(
+					struct bgp_aggregate *aggregate,
+					struct lcommunity *lcommunity);
+extern void bgp_remove_lcommunity_from_aggregate(
+					struct bgp_aggregate *aggregate,
+					struct lcommunity *lcommunity);
+extern void bgp_aggr_lcommunity_remove(void *arg);
+
 #endif /* _QUAGGA_BGP_LCOMMUNITY_H */

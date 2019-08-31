@@ -21,6 +21,7 @@
 #include "log.h"
 #include "memory.h"
 #include "if.h"
+#include "lib_errors.h"
 
 #include "pimd.h"
 #include "pim_iface.h"
@@ -213,8 +214,8 @@ static void igmp_source_timer_on(struct igmp_group *group,
 			source_str, group->group_igmp_sock->interface->name);
 	}
 
-	thread_add_timer_msec(master, igmp_source_timer, source, interval_msec,
-			      &source->t_source_timer);
+	thread_add_timer_msec(router->master, igmp_source_timer, source,
+			      interval_msec, &source->t_source_timer);
 
 	/*
 	  RFC 3376: 6.3. IGMPv3 Source-Specific Forwarding Rules
@@ -331,7 +332,8 @@ void igmp_source_free(struct igmp_source *source)
 static void source_channel_oil_detach(struct igmp_source *source)
 {
 	if (source->source_channel_oil) {
-		pim_channel_oil_del(source->source_channel_oil);
+		pim_channel_oil_del(source->source_channel_oil,
+				    __PRETTY_FUNCTION__);
 		source->source_channel_oil = NULL;
 	}
 }
@@ -457,11 +459,6 @@ struct igmp_source *source_new(struct igmp_group *group,
 	}
 
 	src = XCALLOC(MTYPE_PIM_IGMP_GROUP_SOURCE, sizeof(*src));
-	if (!src) {
-		zlog_warn("%s %s: XCALLOC() failure", __FILE__,
-			  __PRETTY_FUNCTION__);
-		return 0; /* error, not found, could not create */
-	}
 
 	src->t_source_timer = NULL;
 	src->source_group = group; /* back pointer */
@@ -491,9 +488,6 @@ static struct igmp_source *add_source_by_addr(struct igmp_sock *igmp,
 	}
 
 	src = source_new(group, src_addr);
-	if (!src) {
-		return 0;
-	}
 
 	return src;
 }
@@ -584,10 +578,6 @@ static void isex_excl(struct igmp_group *group, int num_sources,
 			/* E.4: if not found, create source with timer=GMI:
 			 * (A-X-Y) */
 			source = source_new(group, *src_addr);
-			if (!source) {
-				/* ugh, internal malloc failure, skip source */
-				continue;
-			}
 			zassert(!source->t_source_timer); /* timer == 0 */
 			igmp_source_reset_gmi(group->group_igmp_sock, group,
 					      source);
@@ -642,10 +632,6 @@ static void isex_incl(struct igmp_group *group, int num_sources,
 			/* I.4: if not found, create source with timer=0 (B-A)
 			 */
 			source = source_new(group, *src_addr);
-			if (!source) {
-				/* ugh, internal malloc failure, skip source */
-				continue;
-			}
 			zassert(!source->t_source_timer); /* (B-A) timer=0 */
 		}
 
@@ -725,10 +711,6 @@ static void toin_incl(struct igmp_group *group, int num_sources,
 		} else {
 			/* If not found, create new source */
 			source = source_new(group, *src_addr);
-			if (!source) {
-				/* ugh, internal malloc failure, skip source */
-				continue;
-			}
 		}
 
 		/* (B)=GMI */
@@ -770,10 +752,6 @@ static void toin_excl(struct igmp_group *group, int num_sources,
 		} else {
 			/* If not found, create new source */
 			source = source_new(group, *src_addr);
-			if (!source) {
-				/* ugh, internal malloc failure, skip source */
-				continue;
-			}
 		}
 
 		/* (A)=GMI */
@@ -859,10 +837,6 @@ static void toex_incl(struct igmp_group *group, int num_sources,
 			/* If source not found, create source with timer=0:
 			 * (B-A)=0 */
 			source = source_new(group, *src_addr);
-			if (!source) {
-				/* ugh, internal malloc failure, skip source */
-				continue;
-			}
 			zassert(!source->t_source_timer); /* (B-A) timer=0 */
 		}
 
@@ -922,10 +896,6 @@ static void toex_excl(struct igmp_group *group, int num_sources,
 			 * (A-X-Y)=Group Timer */
 			long group_timer_msec;
 			source = source_new(group, *src_addr);
-			if (!source) {
-				/* ugh, internal malloc failure, skip source */
-				continue;
-			}
 
 			zassert(!source->t_source_timer); /* timer == 0 */
 			group_timer_msec = igmp_group_timer_remain_msec(group);
@@ -1028,7 +998,7 @@ static void group_retransmit_group(struct igmp_group *group)
 
 	char query_buf[query_buf_size];
 
-	lmqc = igmp->querier_robustness_variable;
+	lmqc = pim_ifp->igmp_last_member_query_count;
 	lmqi_msec = 100 * pim_ifp->igmp_specific_query_max_response_time_dsec;
 	lmqt_msec = lmqc * lmqi_msec;
 
@@ -1107,7 +1077,7 @@ static int group_retransmit_sources(struct igmp_group *group,
 	igmp = group->group_igmp_sock;
 	pim_ifp = igmp->interface->info;
 
-	lmqc = igmp->querier_robustness_variable;
+	lmqc = pim_ifp->igmp_last_member_query_count;
 	lmqi_msec = 100 * pim_ifp->igmp_specific_query_max_response_time_dsec;
 	lmqt_msec = lmqc * lmqi_msec;
 
@@ -1325,7 +1295,8 @@ static void group_retransmit_timer_on(struct igmp_group *group)
 			igmp->interface->name);
 	}
 
-	thread_add_timer_msec(master, igmp_group_retransmit, group, lmqi_msec,
+	thread_add_timer_msec(router->master, igmp_group_retransmit, group,
+			      lmqi_msec,
 			      &group->t_group_query_retransmit_timer);
 }
 
@@ -1344,9 +1315,13 @@ static long igmp_source_timer_remain_msec(struct igmp_source *source)
 */
 static void group_query_send(struct igmp_group *group)
 {
+	struct pim_interface *pim_ifp;
+	struct igmp_sock *igmp;
 	long lmqc; /* Last Member Query Count */
 
-	lmqc = group->group_igmp_sock->querier_robustness_variable;
+	igmp = group->group_igmp_sock;
+	pim_ifp = igmp->interface->info;
+	lmqc = pim_ifp->igmp_last_member_query_count;
 
 	/* lower group timer to lmqt */
 	igmp_group_timer_lower_to_lmqt(group);
@@ -1381,7 +1356,7 @@ static void source_query_send_by_flag(struct igmp_group *group,
 	igmp = group->group_igmp_sock;
 	pim_ifp = igmp->interface->info;
 
-	lmqc = igmp->querier_robustness_variable;
+	lmqc = pim_ifp->igmp_last_member_query_count;
 	lmqi_msec = 100 * pim_ifp->igmp_specific_query_max_response_time_dsec;
 	lmqt_msec = lmqc * lmqi_msec;
 
@@ -1436,10 +1411,6 @@ static void block_excl(struct igmp_group *group, int num_sources,
 			 * (A-X-Y)=Group Timer */
 			long group_timer_msec;
 			source = source_new(group, *src_addr);
-			if (!source) {
-				/* ugh, internal malloc failure, skip source */
-				continue;
-			}
 
 			zassert(!source->t_source_timer); /* timer == 0 */
 			group_timer_msec = igmp_group_timer_remain_msec(group);
@@ -1543,7 +1514,7 @@ void igmp_group_timer_lower_to_lmqt(struct igmp_group *group)
 	ifname = ifp->name;
 
 	lmqi_dsec = pim_ifp->igmp_specific_query_max_response_time_dsec;
-	lmqc = igmp->querier_robustness_variable;
+	lmqc = pim_ifp->igmp_last_member_query_count;
 	lmqt_msec = PIM_IGMP_LMQT_MSEC(
 		lmqi_dsec, lmqc); /* lmqt_msec = (100 * lmqi_dsec) * lmqc */
 
@@ -1580,7 +1551,7 @@ void igmp_source_timer_lower_to_lmqt(struct igmp_source *source)
 	ifname = ifp->name;
 
 	lmqi_dsec = pim_ifp->igmp_specific_query_max_response_time_dsec;
-	lmqc = igmp->querier_robustness_variable;
+	lmqc = pim_ifp->igmp_last_member_query_count;
 	lmqt_msec = PIM_IGMP_LMQT_MSEC(
 		lmqi_dsec, lmqc); /* lmqt_msec = (100 * lmqi_dsec) * lmqc */
 
@@ -1619,7 +1590,8 @@ void igmp_v3_send_query(struct igmp_group *group, int fd, const char *ifname,
 
 	msg_size = IGMP_V3_SOURCES_OFFSET + (num_sources << 2);
 	if (msg_size > query_buf_size) {
-		zlog_err(
+		flog_err(
+			EC_LIB_DEVELOPMENT,
 			"%s %s: unable to send: msg_size=%zd larger than query_buf_size=%d",
 			__FILE__, __PRETTY_FUNCTION__, msg_size,
 			query_buf_size);
@@ -1874,6 +1846,9 @@ int igmp_v3_recv_report(struct igmp_sock *igmp, struct in_addr from,
 	int local_ncb = 0;
 	struct pim_interface *pim_ifp;
 
+	if (igmp->mtrace_only)
+		return 0;
+
 	pim_ifp = igmp->interface->info;
 
 	if (igmp_msg_len < IGMP_V3_MSG_MIN_SIZE) {
@@ -1896,6 +1871,9 @@ int igmp_v3_recv_report(struct igmp_sock *igmp, struct in_addr from,
 			from_str, ifp->name, recv_checksum, checksum);
 		return -1;
 	}
+
+	/* Collecting IGMP Rx stats */
+	igmp->rx_stats.report_v3++;
 
 	num_groups = ntohs(
 		*(uint16_t *)(igmp_msg + IGMP_V3_REPORT_NUMGROUPS_OFFSET));

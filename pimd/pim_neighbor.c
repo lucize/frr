@@ -25,6 +25,7 @@
 #include "if.h"
 #include "vty.h"
 #include "plist.h"
+#include "lib_errors.h"
 
 #include "pimd.h"
 #include "pim_neighbor.h"
@@ -254,8 +255,8 @@ void pim_neighbor_timer_reset(struct pim_neighbor *neigh, uint16_t holdtime)
 			   neigh->interface->name);
 	}
 
-	thread_add_timer(master, on_neighbor_timer, neigh, neigh->holdtime,
-			 &neigh->t_expire_timer);
+	thread_add_timer(router->master, on_neighbor_timer, neigh,
+			 neigh->holdtime, &neigh->t_expire_timer);
 }
 
 static int on_neighbor_jp_timer(struct thread *t)
@@ -276,8 +277,8 @@ static int on_neighbor_jp_timer(struct thread *t)
 	rpf.rpf_addr.u.prefix4 = neigh->source_addr;
 	pim_joinprune_send(&rpf, neigh->upstream_jp_agg);
 
-	thread_add_timer(master, on_neighbor_jp_timer, neigh, qpim_t_periodic,
-			 &neigh->jp_timer);
+	thread_add_timer(router->master, on_neighbor_jp_timer, neigh,
+			 router->t_periodic, &neigh->jp_timer);
 
 	return 0;
 }
@@ -285,8 +286,8 @@ static int on_neighbor_jp_timer(struct thread *t)
 static void pim_neighbor_start_jp_timer(struct pim_neighbor *neigh)
 {
 	THREAD_TIMER_OFF(neigh->jp_timer);
-	thread_add_timer(master, on_neighbor_jp_timer, neigh, qpim_t_periodic,
-			 &neigh->jp_timer);
+	thread_add_timer(router->master, on_neighbor_jp_timer, neigh,
+			 router->t_periodic, &neigh->jp_timer);
 }
 
 static struct pim_neighbor *
@@ -305,11 +306,6 @@ pim_neighbor_new(struct interface *ifp, struct in_addr source_addr,
 	zassert(pim_ifp);
 
 	neigh = XCALLOC(MTYPE_PIM_NEIGHBOR, sizeof(*neigh));
-	if (!neigh) {
-		zlog_err("%s: PIM XCALLOC(%zu) failure", __PRETTY_FUNCTION__,
-			 sizeof(*neigh));
-		return 0;
-	}
 
 	neigh->creation = pim_time_monotonic_sec();
 	neigh->source_addr = source_addr;
@@ -401,7 +397,7 @@ static void delete_prefix_list(struct pim_neighbor *neigh)
 		}
 #endif
 
-		list_delete_and_null(&neigh->prefix_list);
+		list_delete(&neigh->prefix_list);
 	}
 }
 
@@ -411,8 +407,11 @@ void pim_neighbor_free(struct pim_neighbor *neigh)
 
 	delete_prefix_list(neigh);
 
-	list_delete_and_null(&neigh->upstream_jp_agg);
+	list_delete(&neigh->upstream_jp_agg);
 	THREAD_OFF(neigh->jp_timer);
+
+	if (neigh->bfd_info)
+		pim_bfd_info_free(&neigh->bfd_info);
 
 	XFREE(MTYPE_PIM_NEIGHBOR, neigh);
 }
@@ -425,9 +424,10 @@ struct pim_neighbor *pim_neighbor_find_by_secondary(struct interface *ifp,
 	struct pim_neighbor *neigh;
 	struct prefix *p;
 
-	pim_ifp = ifp->info;
-	if (!pim_ifp)
+	if (!ifp || !ifp->info)
 		return NULL;
+
+	pim_ifp = ifp->info;
 
 	for (ALL_LIST_ELEMENTS_RO(pim_ifp->pim_neighbor_list, node, neigh)) {
 		for (ALL_LIST_ELEMENTS_RO(neigh->prefix_list, pnode, p)) {
@@ -475,17 +475,6 @@ struct pim_neighbor *pim_neighbor_find_if(struct interface *ifp)
 		return NULL;
 
 	return listnode_head(pim_ifp->pim_neighbor_list);
-}
-
-/* rpf info associated with an upstream entry needs to be re-evaluated
- * when an RPF neighbor comes or goes */
-static void pim_neighbor_rpf_update(void)
-{
-	/* XXX: for the time being piggyback on the timer used on rib changes
-	 * to scan and update the rpf nexthop. This is expensive processing
-	 * and we should be able to optimize neighbor changes differently than
-	 * nexthop changes. */
-	sched_rpf_cache_refresh();
 }
 
 struct pim_neighbor *
@@ -552,11 +541,11 @@ pim_neighbor_add(struct interface *ifp, struct in_addr source_addr,
 	   Upon PIM neighbor UP, iterate all RPs and update
 	   nexthop cache with this neighbor.
 	 */
-	pim_resolve_rp_nh(pim_ifp->pim);
+	pim_resolve_rp_nh(pim_ifp->pim, neigh);
 
 	pim_rp_setup(pim_ifp->pim);
 
-	pim_neighbor_rpf_update();
+	sched_rpf_cache_refresh(pim_ifp->pim);
 	return neigh;
 }
 
@@ -678,7 +667,7 @@ void pim_neighbor_delete(struct interface *ifp, struct pim_neighbor *neigh,
 
 	pim_neighbor_free(neigh);
 
-	pim_neighbor_rpf_update();
+	sched_rpf_cache_refresh(pim_ifp->pim);
 }
 
 void pim_neighbor_delete_all(struct interface *ifp, const char *delete_message)
@@ -812,7 +801,8 @@ void pim_neighbor_update(struct pim_neighbor *neigh,
 
 	if (neigh->prefix_list == addr_list) {
 		if (addr_list) {
-			zlog_err(
+			flog_err(
+				EC_LIB_DEVELOPMENT,
 				"%s: internal error: trying to replace same prefix list=%p",
 				__PRETTY_FUNCTION__, (void *)addr_list);
 		}

@@ -31,7 +31,6 @@
 #include "if.h"
 #include "thread.h"
 
-#include "isisd/dict.h"
 #include "isisd/isis_constants.h"
 #include "isisd/isis_common.h"
 #include "isisd/isis_flags.h"
@@ -76,7 +75,7 @@ static int dyn_cache_cleanup(struct thread *thread)
 	return ISIS_OK;
 }
 
-struct isis_dynhn *dynhn_find_by_id(const u_char *id)
+struct isis_dynhn *dynhn_find_by_id(const uint8_t *id)
 {
 	struct listnode *node = NULL;
 	struct isis_dynhn *dyn = NULL;
@@ -100,7 +99,7 @@ struct isis_dynhn *dynhn_find_by_name(const char *hostname)
 	return NULL;
 }
 
-void isis_dynhn_insert(const u_char *id, const char *hostname, int level)
+void isis_dynhn_insert(const uint8_t *id, const char *hostname, int level)
 {
 	struct isis_dynhn *dyn;
 
@@ -116,7 +115,7 @@ void isis_dynhn_insert(const u_char *id, const char *hostname, int level)
 	dyn->refresh = time(NULL);
 }
 
-void isis_dynhn_remove(const u_char *id)
+void isis_dynhn_remove(const uint8_t *id)
 {
 	struct isis_dynhn *dyn;
 

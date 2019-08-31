@@ -23,6 +23,10 @@
 
 #include "qobj.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct keychain {
 	char *name;
 
@@ -36,11 +40,11 @@ struct key_range {
 	time_t start;
 	time_t end;
 
-	u_char duration;
+	uint8_t duration;
 };
 
 struct key {
-	u_int32_t index;
+	uint32_t index;
 
 	char *string;
 
@@ -53,8 +57,12 @@ DECLARE_QOBJ_TYPE(key)
 
 extern void keychain_init(void);
 extern struct keychain *keychain_lookup(const char *);
-extern struct key *key_lookup_for_accept(const struct keychain *, u_int32_t);
+extern struct key *key_lookup_for_accept(const struct keychain *, uint32_t);
 extern struct key *key_match_for_accept(const struct keychain *, const char *);
 extern struct key *key_lookup_for_send(const struct keychain *);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ZEBRA_KEYCHAIN_H */

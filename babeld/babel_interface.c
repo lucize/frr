@@ -27,6 +27,7 @@ THE SOFTWARE.
 #include "prefix.h"
 #include "vector.h"
 #include "distribute.h"
+#include "lib_errors.h"
 
 #include "babel_main.h"
 #include "util.h"
@@ -38,7 +39,9 @@ THE SOFTWARE.
 #include "neighbour.h"
 #include "route.h"
 #include "xroute.h"
-#include "babel_memory.h"
+#include "babel_errors.h"
+
+DEFINE_MTYPE_STATIC(BABELD, BABEL_IF, "Babel Interface")
 
 #define IS_ENABLE(ifp) (babel_enable_if_lookup(ifp->name) >= 0)
 
@@ -64,7 +67,7 @@ static struct cmd_node babel_interface_node =  /* babeld's interface node.    */
 
 
 int
-babel_interface_up (int cmd, struct zclient *client, zebra_size_t length, vrf_id_t vrf)
+babel_interface_up (ZAPI_CALLBACK_ARGS)
 {
     struct stream *s = NULL;
     struct interface *ifp = NULL;
@@ -72,7 +75,7 @@ babel_interface_up (int cmd, struct zclient *client, zebra_size_t length, vrf_id
     debugf(BABEL_DEBUG_IF, "receive a 'interface up'");
 
     s = zclient->ibuf;
-    ifp = zebra_interface_state_read(s, vrf); /* it updates iflist */
+    ifp = zebra_interface_state_read(s, vrf_id); /* it updates iflist */
 
     if (ifp == NULL) {
         return 0;
@@ -83,7 +86,7 @@ babel_interface_up (int cmd, struct zclient *client, zebra_size_t length, vrf_id
 }
 
 int
-babel_interface_down (int cmd, struct zclient *client, zebra_size_t length, vrf_id_t vrf)
+babel_interface_down (ZAPI_CALLBACK_ARGS)
 {
     struct stream *s = NULL;
     struct interface *ifp = NULL;
@@ -91,7 +94,7 @@ babel_interface_down (int cmd, struct zclient *client, zebra_size_t length, vrf_
     debugf(BABEL_DEBUG_IF, "receive a 'interface down'");
 
     s = zclient->ibuf;
-    ifp = zebra_interface_state_read(s, vrf); /* it updates iflist */
+    ifp = zebra_interface_state_read(s, vrf_id); /* it updates iflist */
 
     if (ifp == NULL) {
         return 0;
@@ -102,14 +105,14 @@ babel_interface_down (int cmd, struct zclient *client, zebra_size_t length, vrf_
 }
 
 int
-babel_interface_add (int cmd, struct zclient *client, zebra_size_t length, vrf_id_t vrf)
+babel_interface_add (ZAPI_CALLBACK_ARGS)
 {
     struct interface *ifp = NULL;
 
     debugf(BABEL_DEBUG_IF, "receive a 'interface add'");
 
     /* read and add the interface in the iflist. */
-    ifp = zebra_interface_add_read (zclient->ibuf, vrf);
+    ifp = zebra_interface_add_read (zclient->ibuf, vrf_id);
 
     if (ifp == NULL) {
         return 0;
@@ -120,7 +123,7 @@ babel_interface_add (int cmd, struct zclient *client, zebra_size_t length, vrf_i
 }
 
 int
-babel_interface_delete (int cmd, struct zclient *client, zebra_size_t length, vrf_id_t vrf)
+babel_interface_delete (ZAPI_CALLBACK_ARGS)
 {
     struct interface *ifp;
     struct stream *s;
@@ -128,7 +131,7 @@ babel_interface_delete (int cmd, struct zclient *client, zebra_size_t length, vr
     debugf(BABEL_DEBUG_IF, "receive a 'interface delete'");
 
     s = zclient->ibuf;
-    ifp = zebra_interface_state_read(s, vrf); /* it updates iflist */
+    ifp = zebra_interface_state_read(s, vrf_id); /* it updates iflist */
 
     if (ifp == NULL)
         return 0;
@@ -144,8 +147,7 @@ babel_interface_delete (int cmd, struct zclient *client, zebra_size_t length, vr
 }
 
 int
-babel_interface_address_add (int cmd, struct zclient *client,
-                             zebra_size_t length, vrf_id_t vrf)
+babel_interface_address_add (ZAPI_CALLBACK_ARGS)
 {
     babel_interface_nfo *babel_ifp;
     struct connected *ifc;
@@ -154,7 +156,7 @@ babel_interface_address_add (int cmd, struct zclient *client,
     debugf(BABEL_DEBUG_IF, "receive a 'interface address add'");
 
     ifc = zebra_interface_address_read (ZEBRA_INTERFACE_ADDRESS_ADD,
-                                        zclient->ibuf, vrf);
+                                        zclient->ibuf, vrf_id);
 
     if (ifc == NULL)
         return 0;
@@ -167,7 +169,7 @@ babel_interface_address_add (int cmd, struct zclient *client,
         if (babel_ifp->ipv4 == NULL) {
             babel_ifp->ipv4 = malloc(4);
             if (babel_ifp->ipv4 == NULL) {
-                zlog_err("not einough memory");
+                flog_err(EC_BABEL_MEMORY, "not enough memory");
             } else {
                 memcpy(babel_ifp->ipv4, &prefix->u.prefix4, 4);
             }
@@ -181,8 +183,7 @@ babel_interface_address_add (int cmd, struct zclient *client,
 }
 
 int
-babel_interface_address_delete (int cmd, struct zclient *client,
-                                zebra_size_t length, vrf_id_t vrf)
+babel_interface_address_delete (ZAPI_CALLBACK_ARGS)
 {
     babel_interface_nfo *babel_ifp;
     struct connected *ifc;
@@ -191,7 +192,7 @@ babel_interface_address_delete (int cmd, struct zclient *client,
     debugf(BABEL_DEBUG_IF, "receive a 'interface address delete'");
 
     ifc = zebra_interface_address_read (ZEBRA_INTERFACE_ADDRESS_DELETE,
-                                        zclient->ibuf, vrf);
+                                        zclient->ibuf, vrf_id);
 
     if (ifc == NULL)
         return 0;
@@ -707,7 +708,7 @@ interface_recalculate(struct interface *ifp)
     tmp = babel_ifp->sendbuf;
     babel_ifp->sendbuf = realloc(babel_ifp->sendbuf, babel_ifp->bufsize);
     if(babel_ifp->sendbuf == NULL) {
-        zlog_err("Couldn't reallocate sendbuf.");
+        flog_err(EC_BABEL_MEMORY, "Couldn't reallocate sendbuf.");
         free(tmp);
         babel_ifp->bufsize = 0;
         return -1;
@@ -727,8 +728,9 @@ interface_recalculate(struct interface *ifp)
     rc = setsockopt(protocol_socket, IPPROTO_IPV6, IPV6_JOIN_GROUP,
                     (char*)&mreq, sizeof(mreq));
     if(rc < 0) {
-        zlog_err("setsockopt(IPV6_JOIN_GROUP) on interface '%s': %s",
-                 ifp->name, safe_strerror(errno));
+        flog_err_sys(EC_LIB_SOCKET,
+		  "setsockopt(IPV6_JOIN_GROUP) on interface '%s': %s",
+                  ifp->name, safe_strerror(errno));
         /* This is probably due to a missing link-local address,
          so down this interface, and wait until the main loop
          tries to up it again. */
@@ -790,8 +792,9 @@ interface_reset(struct interface *ifp)
         rc = setsockopt(protocol_socket, IPPROTO_IPV6, IPV6_LEAVE_GROUP,
                         (char*)&mreq, sizeof(mreq));
         if(rc < 0)
-            zlog_err("setsockopt(IPV6_LEAVE_GROUP) on interface '%s': %s",
-                     ifp->name, safe_strerror(errno));
+            flog_err_sys(EC_LIB_SOCKET,
+		      "setsockopt(IPV6_LEAVE_GROUP) on interface '%s': %s",
+                      ifp->name, safe_strerror(errno));
     }
 
     update_interface_metric(ifp);
@@ -1001,7 +1004,7 @@ show_babel_routes_sub(struct babel_route *route, struct vty *vty,
                 break;
             if(k > 0)
                 channels[j++] = ',';
-            snprintf(channels + j, 100 - j, "%d", route->channels[k]);
+            snprintf(channels + j, 100 - j, "%u", route->channels[k]);
             j = strlen(channels);
         }
         snprintf(channels + j, 100 - j, ")");
@@ -1056,7 +1059,7 @@ DEFUN (show_babel_route,
         }
         route_stream_done(routes);
     } else {
-        zlog_err("Couldn't allocate route stream.");
+        flog_err(EC_BABEL_MEMORY, "Couldn't allocate route stream.");
     }
     xroutes = xroute_stream();
     if(xroutes) {
@@ -1068,7 +1071,7 @@ DEFUN (show_babel_route,
         }
         xroute_stream_done(xroutes);
     } else {
-        zlog_err("Couldn't allocate route stream.");
+        flog_err(EC_BABEL_MEMORY, "Couldn't allocate route stream.");
     }
     return CMD_SUCCESS;
 }
@@ -1103,7 +1106,7 @@ DEFUN (show_babel_route_prefix,
         }
         route_stream_done(routes);
     } else {
-        zlog_err("Couldn't allocate route stream.");
+        flog_err(EC_BABEL_MEMORY, "Couldn't allocate route stream.");
     }
     xroutes = xroute_stream();
     if(xroutes) {
@@ -1115,7 +1118,7 @@ DEFUN (show_babel_route_prefix,
         }
         xroute_stream_done(xroutes);
     } else {
-        zlog_err("Couldn't allocate route stream.");
+        flog_err(EC_BABEL_MEMORY, "Couldn't allocate route stream.");
     }
     return CMD_SUCCESS;
 }
@@ -1161,7 +1164,7 @@ DEFUN (show_babel_route_addr,
         }
         route_stream_done(routes);
     } else {
-        zlog_err("Couldn't allocate route stream.");
+        flog_err(EC_BABEL_MEMORY, "Couldn't allocate route stream.");
     }
     xroutes = xroute_stream();
     if(xroutes) {
@@ -1173,7 +1176,7 @@ DEFUN (show_babel_route_addr,
         }
         xroute_stream_done(xroutes);
     } else {
-        zlog_err("Couldn't allocate route stream.");
+        flog_err(EC_BABEL_MEMORY, "Couldn't allocate route stream.");
     }
     return CMD_SUCCESS;
 }
@@ -1220,7 +1223,7 @@ DEFUN (show_babel_route_addr6,
         }
         route_stream_done(routes);
     } else {
-        zlog_err("Couldn't allocate route stream.");
+        flog_err(EC_BABEL_MEMORY, "Couldn't allocate route stream.");
     }
     xroutes = xroute_stream();
     if(xroutes) {
@@ -1232,7 +1235,7 @@ DEFUN (show_babel_route_addr6,
         }
         xroute_stream_done(xroutes);
     } else {
-        zlog_err("Couldn't allocate route stream.");
+        flog_err(EC_BABEL_MEMORY, "Couldn't allocate route stream.");
     }
     return CMD_SUCCESS;
 }
@@ -1244,16 +1247,21 @@ DEFUN (show_babel_parameters,
        "Babel information\n"
        "Configuration information\n")
 {
+    struct babel *babel_ctx;
+
     vty_out (vty, "    -- Babel running configuration --\n");
     show_babel_main_configuration(vty);
-    vty_out (vty, "    -- distribution lists --\n");
-    config_show_distribute(vty);
 
+    babel_ctx = babel_lookup();
+    if (babel_ctx) {
+        vty_out (vty, "    -- distribution lists --\n");
+        config_show_distribute(vty, babel_ctx->distribute_ctx);
+    }
     return CMD_SUCCESS;
 }
 
 void
-babel_if_init ()
+babel_if_init(void)
 {
     /* initialize interface list */
     hook_register_prio(if_add, 0, babel_if_new_hook);
@@ -1405,12 +1413,7 @@ static babel_interface_nfo *
 babel_interface_allocate (void)
 {
     babel_interface_nfo *babel_ifp;
-    babel_ifp = XMALLOC(MTYPE_BABEL_IF, sizeof(babel_interface_nfo));
-    if(babel_ifp == NULL)
-        return NULL;
-
-    /* Here are set the default values for an interface. */
-    memset(babel_ifp, 0, sizeof(babel_interface_nfo));
+    babel_ifp = XCALLOC(MTYPE_BABEL_IF, sizeof(babel_interface_nfo));
     /* All flags are unset */
     babel_ifp->bucket_time = babel_now.tv_sec;
     babel_ifp->bucket = BUCKET_TOKENS_MAX;

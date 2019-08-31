@@ -1,6 +1,4 @@
 /*
- * $Id: main.c,v 1.1 2005/04/25 16:42:24 paul Exp $
- *
  * This file is part of Quagga.
  *
  * Quagga is free software; you can redistribute it and/or modify it
@@ -28,7 +26,7 @@
 #include "memory.h"
 #include "memory_vty.h"
 
-extern void test_init();
+extern void test_init(void);
 
 struct thread_master *master;
 
@@ -58,12 +56,12 @@ static int test_timer(struct thread *thread)
 	return 0;
 }
 
-static void test_timer_init()
+static void test_timer_init(void)
 {
 	thread_add_timer(master, test_timer, &timer_count, 10, NULL);
 }
 
-static void test_vty_init()
+static void test_vty_init(void)
 {
 	install_element(VIEW_NODE, &daemon_exit_cmd);
 }
@@ -155,8 +153,10 @@ int main(int argc, char **argv)
 
 	/* Library inits. */
 	cmd_init(1);
-	vty_init(master);
+	vty_init(master, false);
 	memory_init();
+	yang_init();
+	nb_init(master, NULL, 0);
 
 	/* OSPF vty inits. */
 	test_vty_init();
@@ -173,7 +173,7 @@ int main(int argc, char **argv)
 	/* Configuration file read*/
 	if (!config_file)
 		usage(progname, 1);
-	vty_read_config(config_file, NULL);
+	vty_read_config(NULL, config_file, NULL);
 
 	test_timer_init();
 

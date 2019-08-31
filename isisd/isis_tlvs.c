@@ -107,6 +107,111 @@ static const struct tlv_ops *tlv_table[ISIS_CONTEXT_MAX][ISIS_TLV_MAX];
 /* Prototypes */
 static void append_item(struct isis_item_list *dest, struct isis_item *item);
 
+/* Functions for Sub-TLV 3 SR Prefix-SID */
+
+static struct isis_item *copy_item_prefix_sid(struct isis_item *i)
+{
+	struct isis_prefix_sid *sid = (struct isis_prefix_sid *)i;
+	struct isis_prefix_sid *rv = XCALLOC(MTYPE_ISIS_SUBTLV, sizeof(*rv));
+
+	rv->flags = sid->flags;
+	rv->algorithm = sid->algorithm;
+	rv->value = sid->value;
+	return (struct isis_item *)rv;
+}
+
+static void format_item_prefix_sid(uint16_t mtid, struct isis_item *i,
+				   struct sbuf *buf, int indent)
+{
+	struct isis_prefix_sid *sid = (struct isis_prefix_sid *)i;
+
+	sbuf_push(buf, indent, "SR Prefix-SID:\n");
+	sbuf_push(buf, indent, "  Flags:%s%s%s%s%s%s\n",
+		  sid->flags & ISIS_PREFIX_SID_READVERTISED ? " READVERTISED" : "",
+		  sid->flags & ISIS_PREFIX_SID_NODE ? " NODE" : "",
+		  sid->flags & ISIS_PREFIX_SID_NO_PHP ? " NO_PHP" : "",
+		  sid->flags & ISIS_PREFIX_SID_EXPLICIT_NULL ? " EXPLICIT-NULL" : "",
+		  sid->flags & ISIS_PREFIX_SID_VALUE ? " VALUE" : "",
+		  sid->flags & ISIS_PREFIX_SID_LOCAL ? " LOCAL" : "");
+	sbuf_push(buf, indent, "  Algorithm: %" PRIu8 "\n", sid->algorithm);
+	if (sid->flags & ISIS_PREFIX_SID_VALUE) {
+		sbuf_push(buf, indent,  "Label: %" PRIu32 "\n", sid->value);
+	} else {
+		sbuf_push(buf, indent,  "Index: %" PRIu32 "\n", sid->value);
+	}
+}
+
+static void free_item_prefix_sid(struct isis_item *i)
+{
+	XFREE(MTYPE_ISIS_SUBTLV, i);
+}
+
+static int pack_item_prefix_sid(struct isis_item *i, struct stream *s)
+{
+	struct isis_prefix_sid *sid = (struct isis_prefix_sid *)i;
+
+	uint8_t size = (sid->flags & ISIS_PREFIX_SID_VALUE) ? 5 : 6;
+
+	if (STREAM_WRITEABLE(s) < size)
+		return 1;
+
+	stream_putc(s, sid->flags);
+	stream_putc(s, sid->algorithm);
+
+	if (sid->flags & ISIS_PREFIX_SID_VALUE) {
+		stream_put3(s, sid->value);
+	} else {
+		stream_putl(s, sid->value);
+	}
+
+	return 0;
+}
+
+static int unpack_item_prefix_sid(uint16_t mtid, uint8_t len, struct stream *s,
+				  struct sbuf *log, void *dest, int indent)
+{
+	struct isis_subtlvs *subtlvs = dest;
+	struct isis_prefix_sid sid = {
+	};
+
+	sbuf_push(log, indent, "Unpacking SR Prefix-SID...\n");
+
+	if (len < 5) {
+		sbuf_push(log, indent,
+			  "Not enough data left. (expected 5 or more bytes, got %" PRIu8 ")\n",
+			  len);
+		return 1;
+	}
+
+	sid.flags = stream_getc(s);
+	if ((sid.flags & ISIS_PREFIX_SID_VALUE)
+	    != (sid.flags & ISIS_PREFIX_SID_LOCAL)) {
+		sbuf_push(log, indent, "Flags inplausible: Local Flag needs to match Value Flag\n");
+		return 0;
+	}
+
+	sid.algorithm = stream_getc(s);
+
+	uint8_t expected_size = (sid.flags & ISIS_PREFIX_SID_VALUE) ? 5 : 6;
+	if (len != expected_size) {
+		sbuf_push(log, indent,
+			  "TLV size differs from expected size. "
+			  "(expected %u but got %" PRIu8 ")\n",
+			  expected_size, len);
+		return 1;
+	}
+
+	if (sid.flags & ISIS_PREFIX_SID_VALUE) {
+		sid.value = stream_get3(s);
+	} else {
+		sid.value = stream_getl(s);
+	}
+
+	format_item_prefix_sid(mtid, (struct isis_item *)&sid, log, indent + 2);
+	append_item(&subtlvs->prefix_sids, copy_item_prefix_sid((struct isis_item *)&sid));
+	return 0;
+}
+
 /* Functions for Sub-TVL ??? IPv6 Source Prefix */
 
 static struct prefix_ipv6 *copy_subtlv_ipv6_source_prefix(struct prefix_ipv6 *p)
@@ -198,14 +303,36 @@ static int unpack_subtlv_ipv6_source_prefix(enum isis_tlv_context context,
 	memcpy(subtlvs->source_prefix, &p, sizeof(p));
 	return 0;
 }
+static void init_item_list(struct isis_item_list *items);
+static struct isis_item *copy_item(enum isis_tlv_context context,
+				   enum isis_tlv_type type,
+				   struct isis_item *item);
+static void copy_items(enum isis_tlv_context context, enum isis_tlv_type type,
+		       struct isis_item_list *src, struct isis_item_list *dest);
+static void format_items_(uint16_t mtid, enum isis_tlv_context context,
+			  enum isis_tlv_type type, struct isis_item_list *items,
+			  struct sbuf *buf, int indent);
+#define format_items(...) format_items_(ISIS_MT_IPV4_UNICAST, __VA_ARGS__)
+static void free_items(enum isis_tlv_context context, enum isis_tlv_type type,
+		       struct isis_item_list *items);
+static int pack_items_(uint16_t mtid, enum isis_tlv_context context,
+		       enum isis_tlv_type type, struct isis_item_list *items,
+		       struct stream *s, struct isis_tlvs **fragment_tlvs,
+		       struct pack_order_entry *pe,
+		       struct isis_tlvs *(*new_fragment)(struct list *l),
+		       struct list *new_fragment_arg);
+#define pack_items(...) pack_items_(ISIS_MT_IPV4_UNICAST, __VA_ARGS__)
 
 /* Functions related to subtlvs */
 
-static struct isis_subtlvs *isis_alloc_subtlvs(void)
+static struct isis_subtlvs *isis_alloc_subtlvs(enum isis_tlv_context context)
 {
 	struct isis_subtlvs *result;
 
 	result = XCALLOC(MTYPE_ISIS_SUBTLV, sizeof(*result));
+	result->context = context;
+
+	init_item_list(&result->prefix_sids);
 
 	return result;
 }
@@ -217,6 +344,11 @@ static struct isis_subtlvs *copy_subtlvs(struct isis_subtlvs *subtlvs)
 
 	struct isis_subtlvs *rv = XCALLOC(MTYPE_ISIS_SUBTLV, sizeof(*rv));
 
+	rv->context = subtlvs->context;
+
+	copy_items(subtlvs->context, ISIS_SUBTLV_PREFIX_SID,
+		   &subtlvs->prefix_sids, &rv->prefix_sids);
+
 	rv->source_prefix =
 		copy_subtlv_ipv6_source_prefix(subtlvs->source_prefix);
 	return rv;
@@ -225,6 +357,9 @@ static struct isis_subtlvs *copy_subtlvs(struct isis_subtlvs *subtlvs)
 static void format_subtlvs(struct isis_subtlvs *subtlvs, struct sbuf *buf,
 			   int indent)
 {
+	format_items(subtlvs->context, ISIS_SUBTLV_PREFIX_SID,
+		     &subtlvs->prefix_sids, buf, indent);
+
 	format_subtlv_ipv6_source_prefix(subtlvs->source_prefix, buf, indent);
 }
 
@@ -232,6 +367,9 @@ static void isis_free_subtlvs(struct isis_subtlvs *subtlvs)
 {
 	if (!subtlvs)
 		return;
+
+	free_items(subtlvs->context, ISIS_SUBTLV_PREFIX_SID,
+		   &subtlvs->prefix_sids);
 
 	XFREE(MTYPE_ISIS_SUBTLV, subtlvs->source_prefix);
 
@@ -248,6 +386,11 @@ static int pack_subtlvs(struct isis_subtlvs *subtlvs, struct stream *s)
 
 	stream_putc(s, 0); /* Put 0 as subtlvs length, filled in later */
 
+	rv = pack_items(subtlvs->context, ISIS_SUBTLV_PREFIX_SID,
+			&subtlvs->prefix_sids, s, NULL, NULL, NULL, NULL);
+	if (rv)
+		return rv;
+
 	rv = pack_subtlv_ipv6_source_prefix(subtlvs->source_prefix, s);
 	if (rv)
 		return rv;
@@ -262,7 +405,7 @@ static int pack_subtlvs(struct isis_subtlvs *subtlvs, struct stream *s)
 
 static int unpack_tlvs(enum isis_tlv_context context, size_t avail_len,
 		       struct stream *stream, struct sbuf *log, void *dest,
-		       int indent);
+		       int indent, bool *unpacked_known_tlvs);
 
 /* Functions related to TLVs 1 Area Addresses */
 
@@ -496,8 +639,9 @@ static void format_item_lsp_entry(uint16_t mtid, struct isis_item *i,
 {
 	struct isis_lsp_entry *e = (struct isis_lsp_entry *)i;
 
-	sbuf_push(buf, indent, "LSP Entry: %s, seq 0x%08" PRIx32
-		  ", cksum 0x%04" PRIx16 ", lifetime %" PRIu16 "s\n",
+	sbuf_push(buf, indent,
+		  "LSP Entry: %s, seq 0x%08" PRIx32 ", cksum 0x%04" PRIx16
+		  ", lifetime %" PRIu16 "s\n",
 		  isis_format_id(e->id, 8), e->seqno, e->checksum,
 		  e->rem_lifetime);
 }
@@ -579,7 +723,8 @@ static void format_item_extended_reach(uint16_t mtid, struct isis_item *i,
 	sbuf_push(buf, 0, "\n");
 
 	if (r->subtlv_len && r->subtlvs)
-		mpls_te_print_detail(buf, indent + 2, r->subtlvs, r->subtlv_len);
+		mpls_te_print_detail(buf, indent + 2, r->subtlvs,
+				     r->subtlv_len);
 }
 
 static void free_item_extended_reach(struct isis_item *i)
@@ -651,7 +796,7 @@ static int unpack_item_extended_reach(uint16_t mtid, uint8_t len,
 		size_t subtlv_start = stream_get_getp(s);
 
 		if (unpack_tlvs(ISIS_CONTEXT_SUBTLV_NE_REACH, subtlv_len, s,
-				log, NULL, indent + 4)) {
+				log, NULL, indent + 4, NULL)) {
 			goto out;
 		}
 
@@ -690,7 +835,8 @@ static void format_item_oldstyle_ip_reach(uint16_t mtid, struct isis_item *i,
 	char prefixbuf[PREFIX2STR_BUFFER];
 
 	sbuf_push(buf, indent, "IP Reachability: %s (Metric: %" PRIu8 ")\n",
-		  prefix2str(&r->prefix, prefixbuf, sizeof(prefixbuf)), r->metric);
+		  prefix2str(&r->prefix, prefixbuf, sizeof(prefixbuf)),
+		  r->metric);
 }
 
 static void free_item_oldstyle_ip_reach(struct isis_item *i)
@@ -1126,12 +1272,18 @@ static void format_item_extended_ip_reach(uint16_t mtid, struct isis_item *i,
 	if (mtid != ISIS_MT_IPV4_UNICAST)
 		sbuf_push(buf, 0, " %s", isis_mtid2str(mtid));
 	sbuf_push(buf, 0, "\n");
+
+	if (r->subtlvs) {
+		sbuf_push(buf, indent, "  Subtlvs:\n");
+		format_subtlvs(r->subtlvs, buf, indent + 4);
+	}
 }
 
 static void free_item_extended_ip_reach(struct isis_item *i)
 {
 	struct isis_extended_ip_reach *item =
 		(struct isis_extended_ip_reach *)i;
+	isis_free_subtlvs(item->subtlvs);
 	XFREE(MTYPE_ISIS_TLV, item);
 }
 
@@ -1146,11 +1298,16 @@ static int pack_item_extended_ip_reach(struct isis_item *i, struct stream *s)
 
 	control = r->down ? ISIS_EXTENDED_IP_REACH_DOWN : 0;
 	control |= r->prefix.prefixlen;
+	control |= r->subtlvs ? ISIS_EXTENDED_IP_REACH_SUBTLV : 0;
+
 	stream_putc(s, control);
 
 	if (STREAM_WRITEABLE(s) < (unsigned)PSIZE(r->prefix.prefixlen))
 		return 1;
 	stream_put(s, &r->prefix.prefix.s_addr, PSIZE(r->prefix.prefixlen));
+
+	if (r->subtlvs)
+		return pack_subtlvs(r->subtlvs, s);
 	return 0;
 }
 
@@ -1232,9 +1389,18 @@ static int unpack_item_extended_ip_reach(uint16_t mtid, uint8_t len,
 				  len - 6 - PSIZE(rv->prefix.prefixlen));
 			goto out;
 		}
-		sbuf_push(log, indent, "Skipping %" PRIu8 " bytes of subvls",
-			  subtlv_len);
-		stream_forward_getp(s, subtlv_len);
+
+		rv->subtlvs = isis_alloc_subtlvs(ISIS_CONTEXT_SUBTLV_IP_REACH);
+		bool unpacked_known_tlvs = false;
+
+		if (unpack_tlvs(ISIS_CONTEXT_SUBTLV_IP_REACH, subtlv_len, s,
+				log, rv->subtlvs, indent + 4, &unpacked_known_tlvs)) {
+			goto out;
+		}
+		if (!unpacked_known_tlvs) {
+			isis_free_subtlvs(rv->subtlvs);
+			rv->subtlvs = NULL;
+		}
 	}
 
 	append_item(items, (struct isis_item *)rv);
@@ -1312,7 +1478,7 @@ static int unpack_tlv_dynamic_hostname(enum isis_tlv_context context,
 	bool sane = true;
 	for (uint8_t i = 0; i < tlv_len; i++) {
 		if ((unsigned char)tlvs->hostname[i] > 127
-		    || !isprint(tlvs->hostname[i])) {
+		    || !isprint((unsigned char)tlvs->hostname[i])) {
 			sane = false;
 			tlvs->hostname[i] = '?';
 		}
@@ -1321,6 +1487,239 @@ static int unpack_tlv_dynamic_hostname(enum isis_tlv_context context,
 		sbuf_push(
 			log, indent,
 			"WARNING: Hostname contained non-printable/non-ascii characters.\n");
+	}
+
+	return 0;
+}
+
+/* Functions related to TLV 150 Spine-Leaf-Extension */
+
+static struct isis_spine_leaf *copy_tlv_spine_leaf(
+				const struct isis_spine_leaf *spine_leaf)
+{
+	if (!spine_leaf)
+		return NULL;
+
+	struct isis_spine_leaf *rv = XMALLOC(MTYPE_ISIS_TLV, sizeof(*rv));
+	memcpy(rv, spine_leaf, sizeof(*rv));
+
+	return rv;
+}
+
+static void format_tlv_spine_leaf(const struct isis_spine_leaf *spine_leaf,
+				  struct sbuf *buf, int indent)
+{
+	if (!spine_leaf)
+		return;
+
+	sbuf_push(buf, indent, "Spine-Leaf-Extension:\n");
+	if (spine_leaf->has_tier) {
+		if (spine_leaf->tier == ISIS_TIER_UNDEFINED) {
+			sbuf_push(buf, indent, "  Tier: undefined\n");
+		} else {
+			sbuf_push(buf, indent, "  Tier: %" PRIu8 "\n",
+				  spine_leaf->tier);
+		}
+	}
+
+	sbuf_push(buf, indent, "  Flags:%s%s%s\n",
+		  spine_leaf->is_leaf ? " LEAF" : "",
+		  spine_leaf->is_spine ? " SPINE" : "",
+		  spine_leaf->is_backup ? " BACKUP" : "");
+
+}
+
+static void free_tlv_spine_leaf(struct isis_spine_leaf *spine_leaf)
+{
+	XFREE(MTYPE_ISIS_TLV, spine_leaf);
+}
+
+#define ISIS_SPINE_LEAF_FLAG_TIER 0x08
+#define ISIS_SPINE_LEAF_FLAG_BACKUP 0x04
+#define ISIS_SPINE_LEAF_FLAG_SPINE 0x02
+#define ISIS_SPINE_LEAF_FLAG_LEAF 0x01
+
+static int pack_tlv_spine_leaf(const struct isis_spine_leaf *spine_leaf,
+			       struct stream *s)
+{
+	if (!spine_leaf)
+		return 0;
+
+	uint8_t tlv_len = 2;
+
+	if (STREAM_WRITEABLE(s) < (unsigned)(2 + tlv_len))
+		return 1;
+
+	stream_putc(s, ISIS_TLV_SPINE_LEAF_EXT);
+	stream_putc(s, tlv_len);
+
+	uint16_t spine_leaf_flags = 0;
+
+	if (spine_leaf->has_tier) {
+		spine_leaf_flags |= ISIS_SPINE_LEAF_FLAG_TIER;
+		spine_leaf_flags |= spine_leaf->tier << 12;
+	}
+
+	if (spine_leaf->is_leaf)
+		spine_leaf_flags |= ISIS_SPINE_LEAF_FLAG_LEAF;
+
+	if (spine_leaf->is_spine)
+		spine_leaf_flags |= ISIS_SPINE_LEAF_FLAG_SPINE;
+
+	if (spine_leaf->is_backup)
+		spine_leaf_flags |= ISIS_SPINE_LEAF_FLAG_BACKUP;
+
+	stream_putw(s, spine_leaf_flags);
+
+	return 0;
+}
+
+static int unpack_tlv_spine_leaf(enum isis_tlv_context context,
+				 uint8_t tlv_type, uint8_t tlv_len,
+				 struct stream *s, struct sbuf *log,
+				 void *dest, int indent)
+{
+	struct isis_tlvs *tlvs = dest;
+
+	sbuf_push(log, indent, "Unpacking Spine Leaf Extension TLV...\n");
+	if (tlv_len < 2) {
+		sbuf_push(log, indent, "WARNING: Unexepected TLV size\n");
+		stream_forward_getp(s, tlv_len);
+		return 0;
+	}
+
+	if (tlvs->spine_leaf) {
+		sbuf_push(log, indent,
+			  "WARNING: Spine Leaf Extension TLV present multiple times.\n");
+		stream_forward_getp(s, tlv_len);
+		return 0;
+	}
+
+	tlvs->spine_leaf = XCALLOC(MTYPE_ISIS_TLV, sizeof(*tlvs->spine_leaf));
+
+	uint16_t spine_leaf_flags = stream_getw(s);
+
+	if (spine_leaf_flags & ISIS_SPINE_LEAF_FLAG_TIER) {
+		tlvs->spine_leaf->has_tier = true;
+		tlvs->spine_leaf->tier = spine_leaf_flags >> 12;
+	}
+
+	tlvs->spine_leaf->is_leaf = spine_leaf_flags & ISIS_SPINE_LEAF_FLAG_LEAF;
+	tlvs->spine_leaf->is_spine = spine_leaf_flags & ISIS_SPINE_LEAF_FLAG_SPINE;
+	tlvs->spine_leaf->is_backup = spine_leaf_flags & ISIS_SPINE_LEAF_FLAG_BACKUP;
+
+	stream_forward_getp(s, tlv_len - 2);
+	return 0;
+}
+
+/* Functions related to TLV 240 P2P Three-Way Adjacency */
+
+const char *isis_threeway_state_name(enum isis_threeway_state state)
+{
+	switch (state) {
+	case ISIS_THREEWAY_DOWN:
+		return "Down";
+	case ISIS_THREEWAY_INITIALIZING:
+		return "Initializing";
+	case ISIS_THREEWAY_UP:
+		return "Up";
+	default:
+		return "Invalid!";
+	}
+}
+
+static struct isis_threeway_adj *copy_tlv_threeway_adj(
+				const struct isis_threeway_adj *threeway_adj)
+{
+	if (!threeway_adj)
+		return NULL;
+
+	struct isis_threeway_adj *rv = XMALLOC(MTYPE_ISIS_TLV, sizeof(*rv));
+	memcpy(rv, threeway_adj, sizeof(*rv));
+
+	return rv;
+}
+
+static void format_tlv_threeway_adj(const struct isis_threeway_adj *threeway_adj,
+				     struct sbuf *buf, int indent)
+{
+	if (!threeway_adj)
+		return;
+
+	sbuf_push(buf, indent, "P2P Three-Way Adjacency:\n");
+	sbuf_push(buf, indent, "  State: %s (%d)\n",
+		  isis_threeway_state_name(threeway_adj->state),
+		  threeway_adj->state);
+	sbuf_push(buf, indent, "  Extended Local Circuit ID: %" PRIu32 "\n",
+		  threeway_adj->local_circuit_id);
+	if (!threeway_adj->neighbor_set)
+		return;
+
+	sbuf_push(buf, indent, "  Neighbor System ID: %s\n",
+		  isis_format_id(threeway_adj->neighbor_id, 6));
+	sbuf_push(buf, indent, "  Neighbor Extended Circuit ID: %" PRIu32 "\n",
+		  threeway_adj->neighbor_circuit_id);
+}
+
+static void free_tlv_threeway_adj(struct isis_threeway_adj *threeway_adj)
+{
+	XFREE(MTYPE_ISIS_TLV, threeway_adj);
+}
+
+static int pack_tlv_threeway_adj(const struct isis_threeway_adj *threeway_adj,
+				  struct stream *s)
+{
+	if (!threeway_adj)
+		return 0;
+
+	uint8_t tlv_len = (threeway_adj->neighbor_set) ? 15 : 5;
+
+	if (STREAM_WRITEABLE(s) < (unsigned)(2 + tlv_len))
+		return 1;
+
+	stream_putc(s, ISIS_TLV_THREE_WAY_ADJ);
+	stream_putc(s, tlv_len);
+	stream_putc(s, threeway_adj->state);
+	stream_putl(s, threeway_adj->local_circuit_id);
+
+	if (threeway_adj->neighbor_set) {
+		stream_put(s, threeway_adj->neighbor_id, 6);
+		stream_putl(s, threeway_adj->neighbor_circuit_id);
+	}
+
+	return 0;
+}
+
+static int unpack_tlv_threeway_adj(enum isis_tlv_context context,
+				       uint8_t tlv_type, uint8_t tlv_len,
+				       struct stream *s, struct sbuf *log,
+				       void *dest, int indent)
+{
+	struct isis_tlvs *tlvs = dest;
+
+	sbuf_push(log, indent, "Unpacking P2P Three-Way Adjacency TLV...\n");
+	if (tlv_len != 5 && tlv_len != 15) {
+		sbuf_push(log, indent, "WARNING: Unexepected TLV size\n");
+		stream_forward_getp(s, tlv_len);
+		return 0;
+	}
+
+	if (tlvs->threeway_adj) {
+		sbuf_push(log, indent,
+			  "WARNING: P2P Three-Way Adjacency TLV present multiple times.\n");
+		stream_forward_getp(s, tlv_len);
+		return 0;
+	}
+
+	tlvs->threeway_adj = XCALLOC(MTYPE_ISIS_TLV, sizeof(*tlvs->threeway_adj));
+
+	tlvs->threeway_adj->state = stream_getc(s);
+	tlvs->threeway_adj->local_circuit_id = stream_getl(s);
+
+	if (tlv_len == 15) {
+		tlvs->threeway_adj->neighbor_set = true;
+		stream_get(tlvs->threeway_adj->neighbor_id, s, 6);
+		tlvs->threeway_adj->neighbor_circuit_id = stream_getl(s);
 	}
 
 	return 0;
@@ -1476,10 +1875,16 @@ static int unpack_item_ipv6_reach(uint16_t mtid, uint8_t len, struct stream *s,
 			goto out;
 		}
 
-		rv->subtlvs = isis_alloc_subtlvs();
+		rv->subtlvs = isis_alloc_subtlvs(ISIS_CONTEXT_SUBTLV_IPV6_REACH);
+		bool unpacked_known_tlvs = false;
+
 		if (unpack_tlvs(ISIS_CONTEXT_SUBTLV_IPV6_REACH, subtlv_len, s,
-				log, rv->subtlvs, indent + 4)) {
+				log, rv->subtlvs, indent + 4, &unpacked_known_tlvs)) {
 			goto out;
+		}
+		if (!unpacked_known_tlvs) {
+			isis_free_subtlvs(rv->subtlvs);
+			rv->subtlvs = NULL;
 		}
 	}
 
@@ -1516,16 +1921,16 @@ static void format_item_auth(uint16_t mtid, struct isis_item *i,
 		sbuf_push(buf, indent, "  Password: %s\n", obuf);
 		break;
 	case ISIS_PASSWD_TYPE_HMAC_MD5:
-		for (unsigned int i = 0; i < 16; i++) {
-			snprintf(obuf + 2 * i, sizeof(obuf) - 2 * i,
-				 "%02" PRIx8, auth->value[i]);
+		for (unsigned int j = 0; j < 16; j++) {
+			snprintf(obuf + 2 * j, sizeof(obuf) - 2 * j,
+				 "%02" PRIx8, auth->value[j]);
 		}
 		sbuf_push(buf, indent, "  HMAC-MD5: %s\n", obuf);
 		break;
 	default:
 		sbuf_push(buf, indent, "  Unknown (%" PRIu8 ")\n", auth->type);
 		break;
-	};
+	}
 }
 
 static void free_item_auth(struct isis_item *i)
@@ -1597,6 +2002,114 @@ static int unpack_item_auth(uint16_t mtid, uint8_t len, struct stream *s,
 	return 0;
 }
 
+/* Functions related to TLV 13 Purge Originator */
+
+static struct isis_purge_originator *copy_tlv_purge_originator(
+					struct isis_purge_originator *poi)
+{
+	if (!poi)
+		return NULL;
+
+	struct isis_purge_originator *rv;
+
+	rv = XCALLOC(MTYPE_ISIS_TLV, sizeof(*rv));
+	rv->sender_set = poi->sender_set;
+	memcpy(rv->generator, poi->generator, sizeof(rv->generator));
+	if (poi->sender_set)
+		memcpy(rv->sender, poi->sender, sizeof(rv->sender));
+	return rv;
+}
+
+static void format_tlv_purge_originator(struct isis_purge_originator *poi,
+					struct sbuf *buf, int indent)
+{
+	if (!poi)
+		return;
+
+	sbuf_push(buf, indent, "Purge Originator Identification:\n");
+	sbuf_push(buf, indent, "  Generator: %s\n",
+		  isis_format_id(poi->generator, sizeof(poi->generator)));
+	if (poi->sender_set) {
+		sbuf_push(buf, indent, "  Received-From: %s\n",
+			  isis_format_id(poi->sender, sizeof(poi->sender)));
+	}
+}
+
+static void free_tlv_purge_originator(struct isis_purge_originator *poi)
+{
+	XFREE(MTYPE_ISIS_TLV, poi);
+}
+
+static int pack_tlv_purge_originator(struct isis_purge_originator *poi,
+				     struct stream *s)
+{
+	if (!poi)
+		return 0;
+
+	uint8_t data_len = 1 + sizeof(poi->generator);
+
+	if (poi->sender_set)
+		data_len += sizeof(poi->sender);
+
+	if (STREAM_WRITEABLE(s) < (unsigned)(2 + data_len))
+		return 1;
+
+	stream_putc(s, ISIS_TLV_PURGE_ORIGINATOR);
+	stream_putc(s, data_len);
+	stream_putc(s, poi->sender_set ? 2 : 1);
+	stream_put(s, poi->generator, sizeof(poi->generator));
+	if (poi->sender_set)
+		stream_put(s, poi->sender, sizeof(poi->sender));
+	return 0;
+}
+
+static int unpack_tlv_purge_originator(enum isis_tlv_context context,
+				       uint8_t tlv_type, uint8_t tlv_len,
+				       struct stream *s, struct sbuf *log,
+				       void *dest, int indent)
+{
+	struct isis_tlvs *tlvs = dest;
+	struct isis_purge_originator poi = {};
+
+	sbuf_push(log, indent, "Unpacking Purge Originator Identification TLV...\n");
+	if (tlv_len < 7) {
+		sbuf_push(log, indent, "Not enough data left. (Expected at least 7 bytes, got %"
+			  PRIu8 ")\n", tlv_len);
+		return 1;
+	}
+
+	uint8_t number_of_ids = stream_getc(s);
+
+	if (number_of_ids == 1) {
+		poi.sender_set = false;
+	} else if (number_of_ids == 2) {
+		poi.sender_set = true;
+	} else {
+		sbuf_push(log, indent, "Got invalid value for number of system IDs: %"
+			  PRIu8 ")\n", number_of_ids);
+		return 1;
+	}
+
+	if (tlv_len != 1 + 6 * number_of_ids) {
+		sbuf_push(log, indent, "Incorrect tlv len for number of IDs.\n");
+		return 1;
+	}
+
+	stream_get(poi.generator, s, sizeof(poi.generator));
+	if (poi.sender_set)
+		stream_get(poi.sender, s, sizeof(poi.sender));
+
+	if (tlvs->purge_originator) {
+		sbuf_push(log, indent,
+			  "WARNING: Purge originator present multiple times, ignoring.\n");
+		return 0;
+	}
+
+	tlvs->purge_originator = copy_tlv_purge_originator(&poi);
+	return 0;
+}
+
+
 /* Functions relating to item TLVs */
 
 static void init_item_list(struct isis_item_list *items)
@@ -1654,7 +2167,6 @@ static void format_items_(uint16_t mtid, enum isis_tlv_context context,
 	for (i = items->head; i; i = i->next)
 		format_item(mtid, context, type, i, buf, indent);
 }
-#define format_items(...) format_items_(ISIS_MT_IPV4_UNICAST, __VA_ARGS__)
 
 static void free_item(enum isis_tlv_context tlv_context,
 		      enum isis_tlv_type tlv_type, struct isis_item *item)
@@ -1760,6 +2272,14 @@ top:
 			break;
 		}
 
+		/* Multiple prefix-sids don't go into one TLV, so always break */
+		if (type == ISIS_SUBTLV_PREFIX_SID
+		    && (context == ISIS_CONTEXT_SUBTLV_IP_REACH
+			|| context == ISIS_CONTEXT_SUBTLV_IPV6_REACH)) {
+			item = item->next;
+			break;
+		}
+
 		if (len > 255) {
 			if (!last_len) /* strange, not a single item fit */
 				return 1;
@@ -1794,6 +2314,11 @@ static void append_item(struct isis_item_list *dest, struct isis_item *item)
 	*dest->tail = item;
 	dest->tail = &(*dest->tail)->next;
 	dest->count++;
+}
+
+static struct isis_item *last_item(struct isis_item_list *list)
+{
+	return container_of(list->tail, struct isis_item, next);
 }
 
 static int unpack_item(uint16_t mtid, enum isis_tlv_context context,
@@ -2010,13 +2535,16 @@ struct isis_tlvs *isis_copy_tlvs(struct isis_tlvs *tlvs)
 	copy_items(ISIS_CONTEXT_LSP, ISIS_TLV_AUTH, &tlvs->isis_auth,
 		   &rv->isis_auth);
 
+	rv->purge_originator =
+			copy_tlv_purge_originator(tlvs->purge_originator);
+
 	copy_items(ISIS_CONTEXT_LSP, ISIS_TLV_AREA_ADDRESSES,
 		   &tlvs->area_addresses, &rv->area_addresses);
 
 	copy_items(ISIS_CONTEXT_LSP, ISIS_TLV_MT_ROUTER_INFO,
 		   &tlvs->mt_router_info, &rv->mt_router_info);
 
-	tlvs->mt_router_info_empty = rv->mt_router_info_empty;
+	rv->mt_router_info_empty = tlvs->mt_router_info_empty;
 
 	copy_items(ISIS_CONTEXT_LSP, ISIS_TLV_OLDSTYLE_REACH,
 		   &tlvs->oldstyle_reach, &rv->oldstyle_reach);
@@ -2064,6 +2592,10 @@ struct isis_tlvs *isis_copy_tlvs(struct isis_tlvs *tlvs)
 	copy_mt_items(ISIS_CONTEXT_LSP, ISIS_TLV_MT_IPV6_REACH,
 		      &tlvs->mt_ipv6_reach, &rv->mt_ipv6_reach);
 
+	rv->threeway_adj = copy_tlv_threeway_adj(tlvs->threeway_adj);
+
+	rv->spine_leaf = copy_tlv_spine_leaf(tlvs->spine_leaf);
+
 	return rv;
 }
 
@@ -2073,6 +2605,8 @@ static void format_tlvs(struct isis_tlvs *tlvs, struct sbuf *buf, int indent)
 
 	format_items(ISIS_CONTEXT_LSP, ISIS_TLV_AUTH, &tlvs->isis_auth, buf,
 		     indent);
+
+	format_tlv_purge_originator(tlvs->purge_originator, buf, indent);
 
 	format_items(ISIS_CONTEXT_LSP, ISIS_TLV_AREA_ADDRESSES,
 		     &tlvs->area_addresses, buf, indent);
@@ -2125,6 +2659,10 @@ static void format_tlvs(struct isis_tlvs *tlvs, struct sbuf *buf, int indent)
 
 	format_mt_items(ISIS_CONTEXT_LSP, ISIS_TLV_MT_IPV6_REACH,
 			&tlvs->mt_ipv6_reach, buf, indent);
+
+	format_tlv_threeway_adj(tlvs->threeway_adj, buf, indent);
+
+	format_tlv_spine_leaf(tlvs->spine_leaf, buf, indent);
 }
 
 const char *isis_format_tlvs(struct isis_tlvs *tlvs)
@@ -2145,6 +2683,7 @@ void isis_free_tlvs(struct isis_tlvs *tlvs)
 		return;
 
 	free_items(ISIS_CONTEXT_LSP, ISIS_TLV_AUTH, &tlvs->isis_auth);
+	free_tlv_purge_originator(tlvs->purge_originator);
 	free_items(ISIS_CONTEXT_LSP, ISIS_TLV_AREA_ADDRESSES,
 		   &tlvs->area_addresses);
 	free_items(ISIS_CONTEXT_LSP, ISIS_TLV_MT_ROUTER_INFO,
@@ -2175,6 +2714,8 @@ void isis_free_tlvs(struct isis_tlvs *tlvs)
 	free_items(ISIS_CONTEXT_LSP, ISIS_TLV_IPV6_REACH, &tlvs->ipv6_reach);
 	free_mt_items(ISIS_CONTEXT_LSP, ISIS_TLV_MT_IPV6_REACH,
 		      &tlvs->mt_ipv6_reach);
+	free_tlv_threeway_adj(tlvs->threeway_adj);
+	free_tlv_spine_leaf(tlvs->spine_leaf);
 
 	XFREE(MTYPE_ISIS_TLV, tlvs);
 }
@@ -2284,10 +2825,19 @@ static int pack_tlvs(struct isis_tlvs *tlvs, struct stream *stream,
 	/* When fragmenting, don't add auth as it's already accounted for in the
 	 * size we are given. */
 	if (!fragment_tlvs) {
-		rv = pack_items(ISIS_CONTEXT_LSP, ISIS_TLV_AUTH, &tlvs->isis_auth,
-				stream, NULL, NULL, NULL, NULL);
+		rv = pack_items(ISIS_CONTEXT_LSP, ISIS_TLV_AUTH,
+				&tlvs->isis_auth, stream, NULL, NULL, NULL,
+				NULL);
 		if (rv)
 			return rv;
+	}
+
+	rv = pack_tlv_purge_originator(tlvs->purge_originator, stream);
+	if (rv)
+		return rv;
+	if (fragment_tlvs) {
+		fragment_tlvs->purge_originator =
+			copy_tlv_purge_originator(tlvs->purge_originator);
 	}
 
 	rv = pack_tlv_protocols_supported(&tlvs->protocols_supported, stream);
@@ -2345,6 +2895,22 @@ static int pack_tlvs(struct isis_tlvs *tlvs, struct stream *stream,
 			copy_tlv_te_router_id(tlvs->te_router_id);
 	}
 
+	rv = pack_tlv_threeway_adj(tlvs->threeway_adj, stream);
+	if (rv)
+		return rv;
+	if (fragment_tlvs) {
+		fragment_tlvs->threeway_adj =
+			copy_tlv_threeway_adj(tlvs->threeway_adj);
+	}
+
+	rv = pack_tlv_spine_leaf(tlvs->spine_leaf, stream);
+	if (rv)
+		return rv;
+	if (fragment_tlvs) {
+		fragment_tlvs->spine_leaf =
+			copy_tlv_spine_leaf(tlvs->spine_leaf);
+	}
+
 	for (size_t pack_idx = 0; pack_idx < array_size(pack_order);
 	     pack_idx++) {
 		rv = handle_pack_entry(&pack_order[pack_idx], tlvs, stream,
@@ -2397,7 +2963,7 @@ struct list *isis_fragment_tlvs(struct isis_tlvs *tlvs, size_t size)
 		struct listnode *node;
 		for (ALL_LIST_ELEMENTS_RO(rv, node, fragment_tlvs))
 			isis_free_tlvs(fragment_tlvs);
-		list_delete_and_null(&rv);
+		list_delete(&rv);
 	}
 
 	stream_free(dummy_stream);
@@ -2417,7 +2983,7 @@ static int unpack_tlv_unknown(enum isis_tlv_context context, uint8_t tlv_type,
 
 static int unpack_tlv(enum isis_tlv_context context, size_t avail_len,
 		      struct stream *stream, struct sbuf *log, void *dest,
-		      int indent)
+		      int indent, bool *unpacked_known_tlvs)
 {
 	uint8_t tlv_type, tlv_len;
 	const struct tlv_ops *ops;
@@ -2448,6 +3014,8 @@ static int unpack_tlv(enum isis_tlv_context context, size_t avail_len,
 
 	ops = tlv_table[context][tlv_type];
 	if (ops && ops->unpack) {
+		if (unpacked_known_tlvs)
+			*unpacked_known_tlvs = true;
 		return ops->unpack(context, tlv_type, tlv_len, stream, log,
 				   dest, indent + 2);
 	}
@@ -2458,7 +3026,7 @@ static int unpack_tlv(enum isis_tlv_context context, size_t avail_len,
 
 static int unpack_tlvs(enum isis_tlv_context context, size_t avail_len,
 		       struct stream *stream, struct sbuf *log, void *dest,
-		       int indent)
+		       int indent, bool *unpacked_known_tlvs)
 {
 	int rv;
 	size_t tlv_start, tlv_pos;
@@ -2471,7 +3039,7 @@ static int unpack_tlvs(enum isis_tlv_context context, size_t avail_len,
 
 	while (tlv_pos < avail_len) {
 		rv = unpack_tlv(context, avail_len - tlv_pos, stream, log, dest,
-				indent + 2);
+				indent + 2, unpacked_known_tlvs);
 		if (rv)
 			return rv;
 
@@ -2503,7 +3071,7 @@ int isis_unpack_tlvs(size_t avail_len, struct stream *stream,
 
 	result = isis_alloc_tlvs();
 	rv = unpack_tlvs(ISIS_CONTEXT_LSP, avail_len, stream, &logbuf, result,
-			 indent);
+			 indent, NULL);
 
 	*log = sbuf_buf(&logbuf);
 	*dest = result;
@@ -2532,11 +3100,15 @@ int isis_unpack_tlvs(size_t avail_len, struct stream *stream,
 		.name = _desc_, .unpack = unpack_subtlv_##_name_,              \
 	}
 
+#define ITEM_SUBTLV_OPS(_name_, _desc_) \
+	ITEM_TLV_OPS(_name_, _desc_)
+
 ITEM_TLV_OPS(area_address, "TLV 1 Area Addresses");
 ITEM_TLV_OPS(oldstyle_reach, "TLV 2 IS Reachability");
 ITEM_TLV_OPS(lan_neighbor, "TLV 6 LAN Neighbors");
 ITEM_TLV_OPS(lsp_entry, "TLV 9 LSP Entries");
 ITEM_TLV_OPS(auth, "TLV 10 IS-IS Auth");
+TLV_OPS(purge_originator, "TLV 13 Purge Originator Identification");
 ITEM_TLV_OPS(extended_reach, "TLV 22 Extended Reachability");
 ITEM_TLV_OPS(oldstyle_ip_reach, "TLV 128/130 IP Reachability");
 TLV_OPS(protocols_supported, "TLV 129 Protocols Supported");
@@ -2544,10 +3116,13 @@ ITEM_TLV_OPS(ipv4_address, "TLV 132 IPv4 Interface Address");
 TLV_OPS(te_router_id, "TLV 134 TE Router ID");
 ITEM_TLV_OPS(extended_ip_reach, "TLV 135 Extended IP Reachability");
 TLV_OPS(dynamic_hostname, "TLV 137 Dynamic Hostname");
+TLV_OPS(spine_leaf, "TLV 150 Spine Leaf Extensions");
 ITEM_TLV_OPS(mt_router_info, "TLV 229 MT Router Information");
+TLV_OPS(threeway_adj, "TLV 240 P2P Three-Way Adjacency");
 ITEM_TLV_OPS(ipv6_address, "TLV 232 IPv6 Interface Address");
 ITEM_TLV_OPS(ipv6_reach, "TLV 236 IPv6 Reachability");
 
+ITEM_SUBTLV_OPS(prefix_sid, "Sub-TLV 3 SR Prefix-SID");
 SUBTLV_OPS(ipv6_source_prefix, "Sub-TLV 22 IPv6 Source Prefix");
 
 static const struct tlv_ops *tlv_table[ISIS_CONTEXT_MAX][ISIS_TLV_MAX] = {
@@ -2557,6 +3132,7 @@ static const struct tlv_ops *tlv_table[ISIS_CONTEXT_MAX][ISIS_TLV_MAX] = {
 		[ISIS_TLV_LAN_NEIGHBORS] = &tlv_lan_neighbor_ops,
 		[ISIS_TLV_LSP_ENTRY] = &tlv_lsp_entry_ops,
 		[ISIS_TLV_AUTH] = &tlv_auth_ops,
+		[ISIS_TLV_PURGE_ORIGINATOR] = &tlv_purge_originator_ops,
 		[ISIS_TLV_EXTENDED_REACH] = &tlv_extended_reach_ops,
 		[ISIS_TLV_MT_REACH] = &tlv_extended_reach_ops,
 		[ISIS_TLV_OLDSTYLE_IP_REACH] = &tlv_oldstyle_ip_reach_ops,
@@ -2567,14 +3143,19 @@ static const struct tlv_ops *tlv_table[ISIS_CONTEXT_MAX][ISIS_TLV_MAX] = {
 		[ISIS_TLV_EXTENDED_IP_REACH] = &tlv_extended_ip_reach_ops,
 		[ISIS_TLV_MT_IP_REACH] = &tlv_extended_ip_reach_ops,
 		[ISIS_TLV_DYNAMIC_HOSTNAME] = &tlv_dynamic_hostname_ops,
+		[ISIS_TLV_SPINE_LEAF_EXT] = &tlv_spine_leaf_ops,
 		[ISIS_TLV_MT_ROUTER_INFO] = &tlv_mt_router_info_ops,
+		[ISIS_TLV_THREE_WAY_ADJ] = &tlv_threeway_adj_ops,
 		[ISIS_TLV_IPV6_ADDRESS] = &tlv_ipv6_address_ops,
 		[ISIS_TLV_IPV6_REACH] = &tlv_ipv6_reach_ops,
 		[ISIS_TLV_MT_IPV6_REACH] = &tlv_ipv6_reach_ops,
 	},
 	[ISIS_CONTEXT_SUBTLV_NE_REACH] = {},
-	[ISIS_CONTEXT_SUBTLV_IP_REACH] = {},
+	[ISIS_CONTEXT_SUBTLV_IP_REACH] = {
+		[ISIS_SUBTLV_PREFIX_SID] = &tlv_prefix_sid_ops,
+	},
 	[ISIS_CONTEXT_SUBTLV_IPV6_REACH] = {
+		[ISIS_SUBTLV_PREFIX_SID] = &tlv_prefix_sid_ops,
 		[ISIS_SUBTLV_IPV6_SOURCE_PREFIX] = &subtlv_ipv6_source_prefix_ops,
 	}
 };
@@ -2625,7 +3206,7 @@ void isis_tlvs_add_area_addresses(struct isis_tlvs *tlvs,
 void isis_tlvs_add_lan_neighbors(struct isis_tlvs *tlvs, struct list *neighbors)
 {
 	struct listnode *node;
-	u_char *snpa;
+	uint8_t *snpa;
 
 	for (ALL_LIST_ELEMENTS_RO(neighbors, node, snpa)) {
 		struct isis_lan_neighbor *n =
@@ -2640,8 +3221,7 @@ void isis_tlvs_set_protocols_supported(struct isis_tlvs *tlvs,
 				       struct nlpids *nlpids)
 {
 	tlvs->protocols_supported.count = nlpids->count;
-	if (tlvs->protocols_supported.protocols)
-		XFREE(MTYPE_ISIS_TLV, tlvs->protocols_supported.protocols);
+	XFREE(MTYPE_ISIS_TLV, tlvs->protocols_supported.protocols);
 	if (nlpids->count) {
 		tlvs->protocols_supported.protocols =
 			XCALLOC(MTYPE_ISIS_TLV, nlpids->count);
@@ -2691,13 +3271,18 @@ void isis_tlvs_add_ipv6_addresses(struct isis_tlvs *tlvs,
 {
 	struct listnode *node;
 	struct prefix_ipv6 *ip_addr;
+	unsigned int addr_count = 0;
 
 	for (ALL_LIST_ELEMENTS_RO(addresses, node, ip_addr)) {
+		if (addr_count >= 15)
+			break;
+
 		struct isis_ipv6_address *a =
 			XCALLOC(MTYPE_ISIS_TLV, sizeof(*a));
 
 		a->addr = ip_addr->prefix;
 		append_item(&tlvs->ipv6_address, (struct isis_item *)a);
+		addr_count++;
 	}
 }
 
@@ -2742,17 +3327,17 @@ static const auth_validator_func auth_validators[] = {
 		[ISIS_PASSWD_TYPE_HMAC_MD5] = auth_validator_hmac_md5,
 };
 
-bool isis_tlvs_auth_is_valid(struct isis_tlvs *tlvs, struct isis_passwd *passwd,
-			     struct stream *stream, bool is_lsp)
+int isis_tlvs_auth_is_valid(struct isis_tlvs *tlvs, struct isis_passwd *passwd,
+			    struct stream *stream, bool is_lsp)
 {
 	/* If no auth is set, always pass authentication */
 	if (!passwd->type)
-		return true;
+		return ISIS_AUTH_OK;
 
 	/* If we don't known how to validate the auth, return invalid */
 	if (passwd->type >= array_size(auth_validators)
 	    || !auth_validators[passwd->type])
-		return false;
+		return ISIS_AUTH_NO_VALIDATOR;
 
 	struct isis_auth *auth_head = (struct isis_auth *)tlvs->isis_auth.head;
 	struct isis_auth *auth;
@@ -2763,10 +3348,14 @@ bool isis_tlvs_auth_is_valid(struct isis_tlvs *tlvs, struct isis_passwd *passwd,
 
 	/* If matching auth TLV could not be found, return invalid */
 	if (!auth)
-		return false;
+		return ISIS_AUTH_TYPE_FAILURE;
+
 
 	/* Perform validation and return result */
-	return auth_validators[passwd->type](passwd, stream, auth, is_lsp);
+	if (auth_validators[passwd->type](passwd, stream, auth, is_lsp))
+		return ISIS_AUTH_OK;
+	else
+		return ISIS_AUTH_FAILURE;
 }
 
 bool isis_tlvs_area_addresses_match(struct isis_tlvs *tlvs,
@@ -2846,7 +3435,7 @@ static void tlvs_protocols_supported_to_adj(struct isis_tlvs *tlvs,
 		reduced.nlpids[0] = NLPID_IP;
 	} else if (ipv6_supported) {
 		reduced.count = 1;
-		reduced.nlpids[1] = NLPID_IPV6;
+		reduced.nlpids[0] = NLPID_IPV6;
 	} else {
 		reduced.count = 0;
 	}
@@ -2957,26 +3546,24 @@ void isis_tlvs_add_lsp_entry(struct isis_tlvs *tlvs, struct isis_lsp *lsp)
 
 void isis_tlvs_add_csnp_entries(struct isis_tlvs *tlvs, uint8_t *start_id,
 				uint8_t *stop_id, uint16_t num_lsps,
-				dict_t *lspdb, struct isis_lsp **last_lsp)
+				struct lspdb_head *head,
+				struct isis_lsp **last_lsp)
 {
-	dnode_t *first = dict_lower_bound(lspdb, start_id);
+	struct isis_lsp searchfor;
+	struct isis_lsp *first, *lsp;
+
+	memcpy(&searchfor.hdr.lsp_id, start_id, sizeof(searchfor.hdr.lsp_id));
+	first = lspdb_find_gteq(head, &searchfor);
 	if (!first)
 		return;
 
-	dnode_t *last = dict_upper_bound(lspdb, stop_id);
-	dnode_t *curr = first;
-
-	isis_tlvs_add_lsp_entry(tlvs, first->dict_data);
-	*last_lsp = first->dict_data;
-
-	while (curr) {
-		curr = dict_next(lspdb, curr);
-		if (curr) {
-			isis_tlvs_add_lsp_entry(tlvs, curr->dict_data);
-			*last_lsp = curr->dict_data;
-		}
-		if (curr == last || tlvs->lsp_entries.count == num_lsps)
+	frr_each_from (lspdb, head, lsp, first) {
+		if (memcmp(lsp->hdr.lsp_id, stop_id, sizeof(lsp->hdr.lsp_id))
+			> 0 || tlvs->lsp_entries.count == num_lsps)
 			break;
+
+		isis_tlvs_add_lsp_entry(tlvs, lsp);
+		*last_lsp = lsp;
 	}
 }
 
@@ -3036,6 +3623,21 @@ void isis_tlvs_add_ipv6_reach(struct isis_tlvs *tlvs, uint16_t mtid,
 	append_item(l, (struct isis_item *)r);
 }
 
+void isis_tlvs_add_ipv6_dstsrc_reach(struct isis_tlvs *tlvs, uint16_t mtid,
+				     struct prefix_ipv6 *dest,
+				     struct prefix_ipv6 *src,
+				     uint32_t metric)
+{
+	isis_tlvs_add_ipv6_reach(tlvs, mtid, dest, metric);
+	struct isis_item_list *l = isis_get_mt_items(&tlvs->mt_ipv6_reach,
+						     mtid);
+
+	struct isis_ipv6_reach *r = (struct isis_ipv6_reach*)last_item(l);
+	r->subtlvs = isis_alloc_subtlvs(ISIS_CONTEXT_SUBTLV_IPV6_REACH);
+	r->subtlvs->source_prefix = XCALLOC(MTYPE_ISIS_SUBTLV, sizeof(*src));
+	memcpy(r->subtlvs->source_prefix, src, sizeof(*src));
+}
+
 void isis_tlvs_add_oldstyle_reach(struct isis_tlvs *tlvs, uint8_t *id,
 				  uint8_t metric)
 {
@@ -3068,6 +3670,43 @@ void isis_tlvs_add_extended_reach(struct isis_tlvs *tlvs, uint16_t mtid,
 	append_item(l, (struct isis_item *)r);
 }
 
+void isis_tlvs_add_threeway_adj(struct isis_tlvs *tlvs,
+				enum isis_threeway_state state,
+				uint32_t local_circuit_id,
+				const uint8_t *neighbor_id,
+				uint32_t neighbor_circuit_id)
+{
+	assert(!tlvs->threeway_adj);
+
+	tlvs->threeway_adj = XCALLOC(MTYPE_ISIS_TLV, sizeof(*tlvs->threeway_adj));
+	tlvs->threeway_adj->state = state;
+	tlvs->threeway_adj->local_circuit_id = local_circuit_id;
+
+	if (neighbor_id) {
+		tlvs->threeway_adj->neighbor_set = true;
+		memcpy(tlvs->threeway_adj->neighbor_id, neighbor_id, 6);
+		tlvs->threeway_adj->neighbor_circuit_id = neighbor_circuit_id;
+	}
+}
+
+void isis_tlvs_add_spine_leaf(struct isis_tlvs *tlvs, uint8_t tier,
+			      bool has_tier, bool is_leaf, bool is_spine,
+			      bool is_backup)
+{
+	assert(!tlvs->spine_leaf);
+
+	tlvs->spine_leaf = XCALLOC(MTYPE_ISIS_TLV, sizeof(*tlvs->spine_leaf));
+
+	if (has_tier) {
+		tlvs->spine_leaf->tier = tier;
+	}
+
+	tlvs->spine_leaf->has_tier = has_tier;
+	tlvs->spine_leaf->is_leaf = is_leaf;
+	tlvs->spine_leaf->is_spine = is_spine;
+	tlvs->spine_leaf->is_backup = is_backup;
+}
+
 struct isis_mt_router_info *
 isis_tlvs_lookup_mt_router_info(struct isis_tlvs *tlvs, uint16_t mtid)
 {
@@ -3082,4 +3721,21 @@ isis_tlvs_lookup_mt_router_info(struct isis_tlvs *tlvs, uint16_t mtid)
 	}
 
 	return NULL;
+}
+
+void isis_tlvs_set_purge_originator(struct isis_tlvs *tlvs,
+				    const uint8_t *generator,
+				    const uint8_t *sender)
+{
+	assert(!tlvs->purge_originator);
+
+	tlvs->purge_originator = XCALLOC(MTYPE_ISIS_TLV,
+					 sizeof(*tlvs->purge_originator));
+	memcpy(tlvs->purge_originator->generator, generator,
+	       sizeof(tlvs->purge_originator->generator));
+	if (sender) {
+		tlvs->purge_originator->sender_set = true;
+		memcpy(tlvs->purge_originator->sender, sender,
+		       sizeof(tlvs->purge_originator->sender));
+	}
 }

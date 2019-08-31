@@ -28,6 +28,10 @@
 #include <netmpls/mpls.h>
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 union sockunion {
 	struct sockaddr sa;
 	struct sockaddr_in sin;
@@ -73,12 +77,13 @@ extern unsigned int sockunion_hash(const union sockunion *);
 
 extern size_t family2addrsize(int family);
 extern size_t sockunion_get_addrlen(const union sockunion *);
-extern const u_char *sockunion_get_addr(const union sockunion *);
-extern void sockunion_set(union sockunion *, int family, const u_char *addr,
+extern const uint8_t *sockunion_get_addr(const union sockunion *);
+extern void sockunion_set(union sockunion *, int family, const uint8_t *addr,
 			  size_t bytes);
 
 extern union sockunion *sockunion_str2su(const char *str);
 extern int sockunion_accept(int sock, union sockunion *);
+extern int sockunion_sizeof(const union sockunion *su);
 extern int sockunion_stream_socket(union sockunion *);
 extern int sockopt_reuseaddr(int);
 extern int sockopt_reuseport(int);
@@ -88,7 +93,6 @@ extern int sockunion_bind(int sock, union sockunion *, unsigned short,
 extern int sockopt_ttl(int family, int sock, int ttl);
 extern int sockopt_minttl(int family, int sock, int minttl);
 extern int sockopt_cork(int sock, int onoff);
-extern int sockopt_mark_default(int sock, int mark, struct zebra_privs_t *);
 extern int sockunion_socket(const union sockunion *su);
 extern const char *inet_sutop(const union sockunion *su, char *str);
 extern enum connect_result sockunion_connect(int fd, const union sockunion *su,
@@ -98,5 +102,9 @@ extern union sockunion *sockunion_getpeername(int);
 extern union sockunion *sockunion_dup(const union sockunion *);
 extern void sockunion_free(union sockunion *);
 extern void sockunion_init(union sockunion *);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ZEBRA_SOCKUNION_H */

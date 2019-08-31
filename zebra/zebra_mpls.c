@@ -38,12 +38,15 @@
 
 #include "zebra/rib.h"
 #include "zebra/rt.h"
+#include "zebra/interface.h"
 #include "zebra/zserv.h"
+#include "zebra/zebra_router.h"
 #include "zebra/redistribute.h"
 #include "zebra/debug.h"
 #include "zebra/zebra_memory.h"
 #include "zebra/zebra_vrf.h"
 #include "zebra/zebra_mpls.h"
+#include "zebra/zebra_errors.h"
 
 DEFINE_MTYPE_STATIC(ZEBRA, LSP, "MPLS LSP object")
 DEFINE_MTYPE_STATIC(ZEBRA, FEC, "MPLS FEC object")
@@ -54,14 +57,11 @@ DEFINE_MTYPE_STATIC(ZEBRA, SNHLFE_IFNAME, "MPLS static nexthop ifname")
 
 int mpls_enabled;
 
-/* Default rtm_table for all clients */
-extern struct zebra_t zebrad;
-
 /* static function declarations */
 
 static void fec_evaluate(struct zebra_vrf *zvrf);
-static u_int32_t fec_derive_label_from_index(struct zebra_vrf *vrf,
-					     zebra_fec_t *fec);
+static uint32_t fec_derive_label_from_index(struct zebra_vrf *vrf,
+					    zebra_fec_t *fec);
 static int lsp_install(struct zebra_vrf *zvrf, mpls_label_t label,
 		       struct route_node *rn, struct route_entry *re);
 static int lsp_uninstall(struct zebra_vrf *zvrf, mpls_label_t label);
@@ -72,12 +72,12 @@ static void fec_update_clients(zebra_fec_t *fec);
 static void fec_print(zebra_fec_t *fec, struct vty *vty);
 static zebra_fec_t *fec_find(struct route_table *table, struct prefix *p);
 static zebra_fec_t *fec_add(struct route_table *table, struct prefix *p,
-			    mpls_label_t label, u_int32_t flags,
-			    u_int32_t label_index);
+			    mpls_label_t label, uint32_t flags,
+			    uint32_t label_index);
 static int fec_del(zebra_fec_t *fec);
 
-static unsigned int label_hash(void *p);
-static int label_cmp(const void *p1, const void *p2);
+static unsigned int label_hash(const void *p);
+static bool label_cmp(const void *p1, const void *p2);
 static int nhlfe_nexthop_active_ipv4(zebra_nhlfe_t *nhlfe,
 				     struct nexthop *nexthop);
 static int nhlfe_nexthop_active_ipv6(zebra_nhlfe_t *nhlfe,
@@ -85,8 +85,8 @@ static int nhlfe_nexthop_active_ipv6(zebra_nhlfe_t *nhlfe,
 static int nhlfe_nexthop_active(zebra_nhlfe_t *nhlfe);
 
 static void lsp_select_best_nhlfe(zebra_lsp_t *lsp);
-static void lsp_uninstall_from_kernel(struct hash_backet *backet, void *ctxt);
-static void lsp_schedule(struct hash_backet *backet, void *ctxt);
+static void lsp_uninstall_from_kernel(struct hash_bucket *bucket, void *ctxt);
+static void lsp_schedule(struct hash_bucket *bucket, void *ctxt);
 static wq_item_status lsp_process(struct work_queue *wq, void *data);
 static void lsp_processq_del(struct work_queue *wq, void *data);
 static void lsp_processq_complete(struct work_queue *wq);
@@ -104,7 +104,7 @@ static zebra_nhlfe_t *nhlfe_add(zebra_lsp_t *lsp, enum lsp_types_t lsp_type,
 				ifindex_t ifindex, mpls_label_t out_label);
 static int nhlfe_del(zebra_nhlfe_t *snhlfe);
 static void nhlfe_out_label_update(zebra_nhlfe_t *nhlfe,
-				   struct nexthop_label *nh_label);
+				   struct mpls_label_stack *nh_label);
 static int mpls_lsp_uninstall_all(struct hash *lsp_table, zebra_lsp_t *lsp,
 				  enum lsp_types_t type);
 static int mpls_static_lsp_uninstall_all(struct zebra_vrf *zvrf,
@@ -124,7 +124,6 @@ static zebra_snhlfe_t *snhlfe_add(zebra_slsp_t *slsp,
 static int snhlfe_del(zebra_snhlfe_t *snhlfe);
 static int snhlfe_del_all(zebra_slsp_t *slsp);
 static char *snhlfe2str(zebra_snhlfe_t *snhlfe, char *buf, int size);
-static int mpls_processq_init(struct zebra_t *zebra);
 
 
 /* Static functions */
@@ -182,7 +181,7 @@ static int lsp_install(struct zebra_vrf *zvrf, mpls_label_t label,
 	 * the label advertised by the recursive nexthop (plus we don't have the
 	 * logic yet to push multiple labels).
 	 */
-	for (nexthop = re->nexthop; nexthop; nexthop = nexthop->next) {
+	for (nexthop = re->ng.nexthop; nexthop; nexthop = nexthop->next) {
 		/* Skip inactive and recursive entries. */
 		if (!CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE))
 			continue;
@@ -250,8 +249,7 @@ static int lsp_install(struct zebra_vrf *zvrf, mpls_label_t label,
 				   lsp->ile.in_label, lsp->flags);
 
 		lsp = hash_release(lsp_table, &lsp->ile);
-		if (lsp)
-			XFREE(MTYPE_LSP, lsp);
+		XFREE(MTYPE_LSP, lsp);
 	}
 
 	return 0;
@@ -314,8 +312,7 @@ static int lsp_uninstall(struct zebra_vrf *zvrf, mpls_label_t label)
 				   lsp->ile.in_label, lsp->flags);
 
 		lsp = hash_release(lsp_table, &lsp->ile);
-		if (lsp)
-			XFREE(MTYPE_LSP, lsp);
+		XFREE(MTYPE_LSP, lsp);
 	}
 
 	return 0;
@@ -330,7 +327,7 @@ static void fec_evaluate(struct zebra_vrf *zvrf)
 {
 	struct route_node *rn;
 	zebra_fec_t *fec;
-	u_int32_t old_label, new_label;
+	uint32_t old_label, new_label;
 	int af;
 	char buf[BUFSIZ];
 
@@ -382,10 +379,10 @@ static void fec_evaluate(struct zebra_vrf *zvrf)
  * its label index. The index is "acceptable" if it falls within the
  * globally configured label block (SRGB).
  */
-static u_int32_t fec_derive_label_from_index(struct zebra_vrf *zvrf,
-					     zebra_fec_t *fec)
+static uint32_t fec_derive_label_from_index(struct zebra_vrf *zvrf,
+					    zebra_fec_t *fec)
 {
-	u_int32_t label;
+	uint32_t label;
 
 	if (fec->label_index != MPLS_INVALID_LABEL_INDEX
 	    && zvrf->mpls_srgb.start_label
@@ -411,12 +408,13 @@ static int fec_change_update_lsp(struct zebra_vrf *zvrf, zebra_fec_t *fec,
 	afi_t afi;
 
 	/* Uninstall label forwarding entry, if previously installed. */
-	if (old_label != MPLS_INVALID_LABEL && old_label != MPLS_IMP_NULL_LABEL)
+	if (old_label != MPLS_INVALID_LABEL
+	    && old_label != MPLS_LABEL_IMPLICIT_NULL)
 		lsp_uninstall(zvrf, old_label);
 
 	/* Install label forwarding entry corr. to new label, if needed. */
 	if (fec->label == MPLS_INVALID_LABEL
-	    || fec->label == MPLS_IMP_NULL_LABEL)
+	    || fec->label == MPLS_LABEL_IMPLICIT_NULL)
 		return 0;
 
 	afi = family2afi(PREFIX_FAMILY(&fec->rn->p));
@@ -454,16 +452,15 @@ static int fec_send(zebra_fec_t *fec, struct zserv *client)
 	rn = fec->rn;
 
 	/* Get output stream. */
-	s = client->obuf;
-	stream_reset(s);
+	s = stream_new(ZEBRA_MAX_PACKET_SIZ);
 
-	zserv_create_header(s, ZEBRA_FEC_UPDATE, VRF_DEFAULT);
+	zclient_create_header(s, ZEBRA_FEC_UPDATE, VRF_DEFAULT);
 
 	stream_putw(s, rn->p.family);
 	stream_put_prefix(s, &rn->p);
 	stream_putl(s, fec->label);
 	stream_putw_at(s, 0, stream_get_endp(s));
-	return zebra_server_send_message(client);
+	return zserv_send_message(client, s);
 }
 
 /*
@@ -532,8 +529,8 @@ static zebra_fec_t *fec_find(struct route_table *table, struct prefix *p)
  * or when a binding is configured.
  */
 static zebra_fec_t *fec_add(struct route_table *table, struct prefix *p,
-			    mpls_label_t label, u_int32_t flags,
-			    u_int32_t label_index)
+			    mpls_label_t label, uint32_t flags,
+			    uint32_t label_index)
 {
 	struct route_node *rn;
 	zebra_fec_t *fec;
@@ -549,8 +546,6 @@ static zebra_fec_t *fec_add(struct route_table *table, struct prefix *p,
 
 	if (!fec) {
 		fec = XCALLOC(MTYPE_FEC, sizeof(zebra_fec_t));
-		if (!fec)
-			return NULL;
 
 		rn->info = fec;
 		fec->rn = rn;
@@ -572,7 +567,7 @@ static zebra_fec_t *fec_add(struct route_table *table, struct prefix *p,
  */
 static int fec_del(zebra_fec_t *fec)
 {
-	list_delete_and_null(&fec->client_list);
+	list_delete(&fec->client_list);
 	fec->rn->info = NULL;
 	route_unlock_node(fec->rn);
 	XFREE(MTYPE_FEC, fec);
@@ -582,7 +577,7 @@ static int fec_del(zebra_fec_t *fec)
 /*
  * Hash function for label.
  */
-static unsigned int label_hash(void *p)
+static unsigned int label_hash(const void *p)
 {
 	const zebra_ile_t *ile = p;
 
@@ -592,7 +587,7 @@ static unsigned int label_hash(void *p)
 /*
  * Compare 2 LSP hash entries based on in-label.
  */
-static int label_cmp(const void *p1, const void *p2)
+static bool label_cmp(const void *p1, const void *p2)
 {
 	const zebra_ile_t *ile1 = p1;
 	const zebra_ile_t *ile2 = p2;
@@ -614,7 +609,7 @@ static int nhlfe_nexthop_active_ipv4(zebra_nhlfe_t *nhlfe,
 	struct route_entry *match;
 	struct nexthop *match_nh;
 
-	table = zebra_vrf_table(AFI_IP, SAFI_UNICAST, VRF_DEFAULT);
+	table = zebra_vrf_table(AFI_IP, SAFI_UNICAST, nexthop->vrf_id);
 	if (!table)
 		return 0;
 
@@ -636,7 +631,7 @@ static int nhlfe_nexthop_active_ipv4(zebra_nhlfe_t *nhlfe,
 		    || !CHECK_FLAG(match->flags, ZEBRA_FLAG_SELECTED))
 			continue;
 
-		for (match_nh = match->nexthop; match_nh;
+		for (match_nh = match->ng.nexthop; match_nh;
 		     match_nh = match_nh->next) {
 			if (match->type == ZEBRA_ROUTE_CONNECT
 			    || nexthop->ifindex == match_nh->ifindex) {
@@ -663,7 +658,7 @@ static int nhlfe_nexthop_active_ipv6(zebra_nhlfe_t *nhlfe,
 	struct route_node *rn;
 	struct route_entry *match;
 
-	table = zebra_vrf_table(AFI_IP6, SAFI_UNICAST, VRF_DEFAULT);
+	table = zebra_vrf_table(AFI_IP6, SAFI_UNICAST, nexthop->vrf_id);
 	if (!table)
 		return 0;
 
@@ -687,10 +682,10 @@ static int nhlfe_nexthop_active_ipv6(zebra_nhlfe_t *nhlfe,
 			break;
 	}
 
-	if (!match || !match->nexthop)
+	if (!match || !match->ng.nexthop)
 		return 0;
 
-	nexthop->ifindex = match->nexthop->ifindex;
+	nexthop->ifindex = match->ng.nexthop->ifindex;
 	return 1;
 }
 
@@ -704,6 +699,7 @@ static int nhlfe_nexthop_active(zebra_nhlfe_t *nhlfe)
 {
 	struct nexthop *nexthop;
 	struct interface *ifp;
+	struct zebra_ns *zns;
 
 	nexthop = nhlfe->nexthop;
 	if (!nexthop) // unexpected
@@ -711,6 +707,23 @@ static int nhlfe_nexthop_active(zebra_nhlfe_t *nhlfe)
 
 	/* Check on nexthop based on type. */
 	switch (nexthop->type) {
+	case NEXTHOP_TYPE_IFINDEX:
+		/*
+		 * Lookup if this type is special.  The
+		 * NEXTHOP_TYPE_IFINDEX is a pop and
+		 * forward into a different table for
+		 * processing.  As such this ifindex
+		 * passed to us may be a VRF device
+		 * which will not be in the default
+		 * VRF.  So let's look in all of them
+		 */
+		zns = zebra_ns_lookup(NS_DEFAULT);
+		ifp = if_lookup_by_index_per_ns(zns, nexthop->ifindex);
+		if (ifp && if_is_operative(ifp))
+			SET_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE);
+		else
+			UNSET_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE);
+		break;
 	case NEXTHOP_TYPE_IPV4:
 	case NEXTHOP_TYPE_IPV4_IFINDEX:
 		if (nhlfe_nexthop_active_ipv4(nhlfe, nexthop))
@@ -728,7 +741,8 @@ static int nhlfe_nexthop_active(zebra_nhlfe_t *nhlfe)
 
 	case NEXTHOP_TYPE_IPV6_IFINDEX:
 		if (IN6_IS_ADDR_LINKLOCAL(&nexthop->gate.ipv6)) {
-			ifp = if_lookup_by_index(nexthop->ifindex, VRF_DEFAULT);
+			ifp = if_lookup_by_index(nexthop->ifindex,
+						 nexthop->vrf_id);
 			if (ifp && if_is_operative(ifp))
 				SET_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE);
 			else
@@ -837,24 +851,24 @@ static void lsp_select_best_nhlfe(zebra_lsp_t *lsp)
  * Delete LSP forwarding entry from kernel, if installed. Called upon
  * process exit.
  */
-static void lsp_uninstall_from_kernel(struct hash_backet *backet, void *ctxt)
+static void lsp_uninstall_from_kernel(struct hash_bucket *bucket, void *ctxt)
 {
 	zebra_lsp_t *lsp;
 
-	lsp = (zebra_lsp_t *)backet->data;
+	lsp = (zebra_lsp_t *)bucket->data;
 	if (CHECK_FLAG(lsp->flags, LSP_FLAG_INSTALLED))
-		kernel_del_lsp(lsp);
+		(void)dplane_lsp_delete(lsp);
 }
 
 /*
  * Schedule LSP forwarding entry for processing. Called upon changes
  * that may impact LSPs such as nexthop / connected route changes.
  */
-static void lsp_schedule(struct hash_backet *backet, void *ctxt)
+static void lsp_schedule(struct hash_bucket *bucket, void *ctxt)
 {
 	zebra_lsp_t *lsp;
 
-	lsp = (zebra_lsp_t *)backet->data;
+	lsp = (zebra_lsp_t *)bucket->data;
 	(void)lsp_processq_add(lsp);
 }
 
@@ -868,6 +882,7 @@ static wq_item_status lsp_process(struct work_queue *wq, void *data)
 	zebra_nhlfe_t *oldbest, *newbest;
 	char buf[BUFSIZ], buf2[BUFSIZ];
 	struct zebra_vrf *zvrf = vrf_info_lookup(VRF_DEFAULT);
+	enum zebra_dplane_result res;
 
 	lsp = (zebra_lsp_t *)data;
 	if (!lsp) // unexpected
@@ -897,38 +912,74 @@ static wq_item_status lsp_process(struct work_queue *wq, void *data)
 		if (newbest) {
 
 			UNSET_FLAG(lsp->flags, LSP_FLAG_CHANGED);
-			kernel_add_lsp(lsp);
 
-			zvrf->lsp_installs++;
+			switch (dplane_lsp_add(lsp)) {
+			case ZEBRA_DPLANE_REQUEST_QUEUED:
+				/* Set 'installed' flag so we will know
+				 * that an install is in-flight.
+				 */
+				SET_FLAG(lsp->flags, LSP_FLAG_INSTALLED);
+
+				zvrf->lsp_installs_queued++;
+				break;
+			case ZEBRA_DPLANE_REQUEST_FAILURE:
+				flog_warn(EC_ZEBRA_LSP_INSTALL_FAILURE,
+					  "LSP Install Failure: %u",
+					  lsp->ile.in_label);
+				break;
+			case ZEBRA_DPLANE_REQUEST_SUCCESS:
+				zvrf->lsp_installs++;
+				break;
+			}
 		}
 	} else {
 		/* Installed, may need an update and/or delete. */
 		if (!newbest) {
+			res = dplane_lsp_delete(lsp);
 
-			kernel_del_lsp(lsp);
+			/* We do some of the lsp cleanup immediately for
+			 * deletes.
+			 */
+			UNSET_FLAG(lsp->flags, LSP_FLAG_INSTALLED);
+			clear_nhlfe_installed(lsp);
 
-			zvrf->lsp_removals++;
+			switch (res) {
+			case ZEBRA_DPLANE_REQUEST_QUEUED:
+				zvrf->lsp_removals_queued++;
+				break;
+			case ZEBRA_DPLANE_REQUEST_FAILURE:
+				flog_warn(EC_ZEBRA_LSP_DELETE_FAILURE,
+					  "LSP Deletion Failure: %u",
+					  lsp->ile.in_label);
+				break;
+			case ZEBRA_DPLANE_REQUEST_SUCCESS:
+				zvrf->lsp_removals++;
+				break;
+			}
 		} else if (CHECK_FLAG(lsp->flags, LSP_FLAG_CHANGED)) {
 			zebra_nhlfe_t *nhlfe;
 			struct nexthop *nexthop;
 
 			UNSET_FLAG(lsp->flags, LSP_FLAG_CHANGED);
-			UNSET_FLAG(lsp->flags, LSP_FLAG_INSTALLED);
+
+			/* We leave the INSTALLED flag set here
+			 * so we know an update in in-flight.
+			 */
 
 			/*
 			 * Any NHLFE that was installed but is not
 			 * selected now needs to have its flags updated.
 			 */
-			for (nhlfe = lsp->nhlfe_list;
-			     nhlfe; nhlfe = nhlfe->next) {
+			for (nhlfe = lsp->nhlfe_list; nhlfe;
+			     nhlfe = nhlfe->next) {
 				nexthop = nhlfe->nexthop;
 				if (!nexthop)
 					continue;
 
 				if (CHECK_FLAG(nhlfe->flags,
-					       NHLFE_FLAG_INSTALLED) &&
-				    !CHECK_FLAG(nhlfe->flags,
-						NHLFE_FLAG_SELECTED)) {
+					       NHLFE_FLAG_INSTALLED)
+				    && !CHECK_FLAG(nhlfe->flags,
+						   NHLFE_FLAG_SELECTED)) {
 					UNSET_FLAG(nhlfe->flags,
 						   NHLFE_FLAG_INSTALLED);
 					UNSET_FLAG(nexthop->flags,
@@ -936,9 +987,19 @@ static wq_item_status lsp_process(struct work_queue *wq, void *data)
 				}
 			}
 
-			kernel_upd_lsp(lsp);
-
-			zvrf->lsp_installs++;
+			switch (dplane_lsp_update(lsp)) {
+			case ZEBRA_DPLANE_REQUEST_QUEUED:
+				zvrf->lsp_installs_queued++;
+				break;
+			case ZEBRA_DPLANE_REQUEST_FAILURE:
+				flog_warn(EC_ZEBRA_LSP_INSTALL_FAILURE,
+					  "LSP Update Failure: %u",
+					  lsp->ile.in_label);
+				break;
+			case ZEBRA_DPLANE_REQUEST_SUCCESS:
+				zvrf->lsp_installs++;
+				break;
+			}
 		}
 	}
 
@@ -985,8 +1046,7 @@ static void lsp_processq_del(struct work_queue *wq, void *data)
 				   lsp->ile.in_label, lsp->flags);
 
 		lsp = hash_release(lsp_table, &lsp->ile);
-		if (lsp)
-			XFREE(MTYPE_LSP, lsp);
+		XFREE(MTYPE_LSP, lsp);
 	}
 }
 
@@ -1008,12 +1068,13 @@ static int lsp_processq_add(zebra_lsp_t *lsp)
 	if (CHECK_FLAG(lsp->flags, LSP_FLAG_SCHEDULED))
 		return 0;
 
-	if (zebrad.lsp_process_q == NULL) {
-		zlog_err("%s: work_queue does not exist!", __func__);
+	if (zrouter.lsp_process_q == NULL) {
+		flog_err(EC_ZEBRA_WQ_NONEXISTENT,
+			 "%s: work_queue does not exist!", __func__);
 		return -1;
 	}
 
-	work_queue_add(zebrad.lsp_process_q, lsp);
+	work_queue_add(zrouter.lsp_process_q, lsp);
 	SET_FLAG(lsp->flags, LSP_FLAG_SCHEDULED);
 	return 0;
 }
@@ -1052,6 +1113,8 @@ static char *nhlfe2str(zebra_nhlfe_t *nhlfe, char *buf, int size)
 	case NEXTHOP_TYPE_IPV6:
 		inet_ntop(AF_INET6, &nexthop->gate.ipv6, buf, size);
 		break;
+	case NEXTHOP_TYPE_IFINDEX:
+		snprintf(buf, size, "Ifindex: %u", nexthop->ifindex);
 	default:
 		break;
 	}
@@ -1089,6 +1152,9 @@ static int nhlfe_nhop_match(zebra_nhlfe_t *nhlfe, enum nexthop_types_t gtype,
 			     sizeof(struct in6_addr));
 		if (!cmp && nhop->type == NEXTHOP_TYPE_IPV6_IFINDEX)
 			cmp = !(nhop->ifindex == ifindex);
+		break;
+	case NEXTHOP_TYPE_IFINDEX:
+		cmp = !(nhop->ifindex == ifindex);
 		break;
 	default:
 		break;
@@ -1135,8 +1201,6 @@ static zebra_nhlfe_t *nhlfe_add(zebra_lsp_t *lsp, enum lsp_types_t lsp_type,
 		return NULL;
 
 	nhlfe = XCALLOC(MTYPE_NHLFE, sizeof(zebra_nhlfe_t));
-	if (!nhlfe)
-		return NULL;
 
 	nhlfe->lsp = lsp;
 	nhlfe->type = lsp_type;
@@ -1149,6 +1213,7 @@ static zebra_nhlfe_t *nhlfe_add(zebra_lsp_t *lsp, enum lsp_types_t lsp_type,
 	}
 	nexthop_add_labels(nexthop, lsp_type, 1, &out_label);
 
+	nexthop->vrf_id = VRF_DEFAULT;
 	nexthop->type = gtype;
 	switch (nexthop->type) {
 	case NEXTHOP_TYPE_IPV4:
@@ -1162,6 +1227,9 @@ static zebra_nhlfe_t *nhlfe_add(zebra_lsp_t *lsp, enum lsp_types_t lsp_type,
 		nexthop->gate.ipv6 = gate->ipv6;
 		if (ifindex)
 			nexthop->ifindex = ifindex;
+		break;
+	case NEXTHOP_TYPE_IFINDEX:
+		nexthop->ifindex = ifindex;
 		break;
 	default:
 		nexthop_free(nexthop);
@@ -1217,7 +1285,7 @@ static int nhlfe_del(zebra_nhlfe_t *nhlfe)
  * Update label for NHLFE entry.
  */
 static void nhlfe_out_label_update(zebra_nhlfe_t *nhlfe,
-				   struct nexthop_label *nh_label)
+				   struct mpls_label_stack *nh_label)
 {
 	nhlfe->nexthop->nh_label->label[0] = nh_label->label[0];
 }
@@ -1264,8 +1332,7 @@ static int mpls_lsp_uninstall_all(struct hash *lsp_table, zebra_lsp_t *lsp,
 				   lsp->ile.in_label, lsp->flags);
 
 		lsp = hash_release(lsp_table, &lsp->ile);
-		if (lsp)
-			XFREE(MTYPE_LSP, lsp);
+		XFREE(MTYPE_LSP, lsp);
 	}
 
 	return 0;
@@ -1324,9 +1391,9 @@ static json_object *nhlfe_json(zebra_nhlfe_t *nhlfe)
 			inet_ntop(AF_INET6, &nexthop->gate.ipv6, buf, BUFSIZ));
 
 		if (nexthop->ifindex)
-			json_object_string_add(
-				json_nhlfe, "interface",
-				ifindex2ifname(nexthop->ifindex, VRF_DEFAULT));
+			json_object_string_add(json_nhlfe, "interface",
+					       ifindex2ifname(nexthop->ifindex,
+							      nexthop->vrf_id));
 		break;
 	default:
 		break;
@@ -1356,7 +1423,8 @@ static void nhlfe_print(zebra_nhlfe_t *nhlfe, struct vty *vty)
 		vty_out(vty, "  via %s", inet_ntoa(nexthop->gate.ipv4));
 		if (nexthop->ifindex)
 			vty_out(vty, " dev %s",
-				ifindex2ifname(nexthop->ifindex, VRF_DEFAULT));
+				ifindex2ifname(nexthop->ifindex,
+					       nexthop->vrf_id));
 		break;
 	case NEXTHOP_TYPE_IPV6:
 	case NEXTHOP_TYPE_IPV6_IFINDEX:
@@ -1364,14 +1432,15 @@ static void nhlfe_print(zebra_nhlfe_t *nhlfe, struct vty *vty)
 			inet_ntop(AF_INET6, &nexthop->gate.ipv6, buf, BUFSIZ));
 		if (nexthop->ifindex)
 			vty_out(vty, " dev %s",
-				ifindex2ifname(nexthop->ifindex, VRF_DEFAULT));
+				ifindex2ifname(nexthop->ifindex,
+					       nexthop->vrf_id));
 		break;
 	default:
 		break;
 	}
-	vty_out(vty, "%s", CHECK_FLAG(nhlfe->flags, NHLFE_FLAG_INSTALLED)
-				   ? " (installed)"
-				   : "");
+	vty_out(vty, "%s",
+		CHECK_FLAG(nhlfe->flags, NHLFE_FLAG_INSTALLED) ? " (installed)"
+							       : "");
 	vty_out(vty, "\n");
 }
 
@@ -1419,7 +1488,7 @@ static json_object *lsp_json(zebra_lsp_t *lsp)
 static struct list *hash_get_sorted_list(struct hash *hash, void *cmp)
 {
 	unsigned int i;
-	struct hash_backet *hb;
+	struct hash_bucket *hb;
 	struct list *sorted_list = list_new();
 
 	sorted_list->cmp = (int (*)(void *, void *))cmp;
@@ -1586,8 +1655,7 @@ static int snhlfe_del(zebra_snhlfe_t *snhlfe)
 		slsp->snhlfe_list = snhlfe->next;
 
 	snhlfe->prev = snhlfe->next = NULL;
-	if (snhlfe->ifname)
-		XFREE(MTYPE_SNHLFE_IFNAME, snhlfe->ifname);
+	XFREE(MTYPE_SNHLFE_IFNAME, snhlfe->ifname);
 	XFREE(MTYPE_SNHLFE, snhlfe);
 
 	return 0;
@@ -1625,8 +1693,9 @@ static char *snhlfe2str(zebra_snhlfe_t *snhlfe, char *buf, int size)
 	case NEXTHOP_TYPE_IPV6_IFINDEX:
 		inet_ntop(AF_INET6, &snhlfe->gate.ipv6, buf, size);
 		if (snhlfe->ifindex)
-			strcat(buf,
-			       ifindex2ifname(snhlfe->ifindex, VRF_DEFAULT));
+			strlcat(buf,
+				ifindex2ifname(snhlfe->ifindex, VRF_DEFAULT),
+				size);
 		break;
 	default:
 		break;
@@ -1638,20 +1707,21 @@ static char *snhlfe2str(zebra_snhlfe_t *snhlfe, char *buf, int size)
 /*
  * Initialize work queue for processing changed LSPs.
  */
-static int mpls_processq_init(struct zebra_t *zebra)
+static int mpls_processq_init(void)
 {
-	zebra->lsp_process_q = work_queue_new(zebra->master, "LSP processing");
-	if (!zebra->lsp_process_q) {
-		zlog_err("%s: could not initialise work queue!", __func__);
+	zrouter.lsp_process_q = work_queue_new(zrouter.master, "LSP processing");
+	if (!zrouter.lsp_process_q) {
+		flog_err(EC_ZEBRA_WQ_NONEXISTENT,
+			 "%s: could not initialise work queue!", __func__);
 		return -1;
 	}
 
-	zebra->lsp_process_q->spec.workfunc = &lsp_process;
-	zebra->lsp_process_q->spec.del_item_data = &lsp_processq_del;
-	zebra->lsp_process_q->spec.errorfunc = NULL;
-	zebra->lsp_process_q->spec.completion_func = &lsp_processq_complete;
-	zebra->lsp_process_q->spec.max_retries = 0;
-	zebra->lsp_process_q->spec.hold = 10;
+	zrouter.lsp_process_q->spec.workfunc = &lsp_process;
+	zrouter.lsp_process_q->spec.del_item_data = &lsp_processq_del;
+	zrouter.lsp_process_q->spec.errorfunc = NULL;
+	zrouter.lsp_process_q->spec.completion_func = &lsp_processq_complete;
+	zrouter.lsp_process_q->spec.max_retries = 0;
+	zrouter.lsp_process_q->spec.hold = 10;
 
 	return 0;
 }
@@ -1659,117 +1729,293 @@ static int mpls_processq_init(struct zebra_t *zebra)
 
 /* Public functions */
 
-void kernel_lsp_pass_fail(zebra_lsp_t *lsp,
-			  enum southbound_results res)
+/*
+ * Process LSP update results from zebra dataplane.
+ */
+void zebra_mpls_lsp_dplane_result(struct zebra_dplane_ctx *ctx)
 {
-	struct nexthop *nexthop;
+	struct zebra_vrf *zvrf;
+	zebra_ile_t tmp_ile;
+	struct hash *lsp_table;
+	zebra_lsp_t *lsp;
 	zebra_nhlfe_t *nhlfe;
+	struct nexthop *nexthop;
+	enum dplane_op_e op;
+	enum zebra_dplane_result status;
 
-	if (!lsp)
-		return;
+	op = dplane_ctx_get_op(ctx);
+	status = dplane_ctx_get_status(ctx);
 
-	switch (res) {
-	case SOUTHBOUND_INSTALL_FAILURE:
-		UNSET_FLAG(lsp->flags, LSP_FLAG_INSTALLED);
-		clear_nhlfe_installed(lsp);
-		zlog_warn("LSP Install Failure: %u", lsp->ile.in_label);
+	if (IS_ZEBRA_DEBUG_DPLANE_DETAIL)
+		zlog_debug("LSP dplane ctx %p, op %s, in-label %u, result %s",
+			   ctx, dplane_op2str(op),
+			   dplane_ctx_get_in_label(ctx),
+			   dplane_res2str(status));
+
+	switch (op) {
+	case DPLANE_OP_LSP_INSTALL:
+	case DPLANE_OP_LSP_UPDATE:
+		/* Look for zebra LSP object */
+		zvrf = vrf_info_lookup(VRF_DEFAULT);
+		if (zvrf == NULL)
+			break;
+
+		lsp_table = zvrf->lsp_table;
+
+		tmp_ile.in_label = dplane_ctx_get_in_label(ctx);
+		lsp = hash_lookup(lsp_table, &tmp_ile);
+		if (lsp == NULL) {
+			if (IS_ZEBRA_DEBUG_DPLANE)
+				zlog_debug("LSP ctx %p: in-label %u not found",
+					   ctx, dplane_ctx_get_in_label(ctx));
+			break;
+		}
+
+		/* TODO -- Confirm that this result is still 'current' */
+
+		if (status == ZEBRA_DPLANE_REQUEST_SUCCESS) {
+			/* Update zebra object */
+			SET_FLAG(lsp->flags, LSP_FLAG_INSTALLED);
+			for (nhlfe = lsp->nhlfe_list; nhlfe;
+			     nhlfe = nhlfe->next) {
+				nexthop = nhlfe->nexthop;
+				if (!nexthop)
+					continue;
+
+				SET_FLAG(nhlfe->flags, NHLFE_FLAG_INSTALLED);
+				SET_FLAG(nexthop->flags, NEXTHOP_FLAG_FIB);
+			}
+		} else {
+			UNSET_FLAG(lsp->flags, LSP_FLAG_INSTALLED);
+			clear_nhlfe_installed(lsp);
+			flog_warn(EC_ZEBRA_LSP_INSTALL_FAILURE,
+				  "LSP Install Failure: in-label %u",
+				  lsp->ile.in_label);
+		}
+
 		break;
-	case SOUTHBOUND_INSTALL_SUCCESS:
-		SET_FLAG(lsp->flags, LSP_FLAG_INSTALLED);
-		for (nhlfe = lsp->nhlfe_list; nhlfe; nhlfe = nhlfe->next) {
-			nexthop = nhlfe->nexthop;
-			if (!nexthop)
+
+	case DPLANE_OP_LSP_DELETE:
+		if (status != ZEBRA_DPLANE_REQUEST_SUCCESS)
+			flog_warn(EC_ZEBRA_LSP_DELETE_FAILURE,
+				  "LSP Deletion Failure: in-label %u",
+				  dplane_ctx_get_in_label(ctx));
+		break;
+
+	default:
+		break;
+
+	} /* Switch */
+
+	dplane_ctx_fini(&ctx);
+}
+
+/*
+ * Process async dplane notifications.
+ */
+void zebra_mpls_process_dplane_notify(struct zebra_dplane_ctx *ctx)
+{
+	struct zebra_vrf *zvrf;
+	zebra_ile_t tmp_ile;
+	struct hash *lsp_table;
+	zebra_lsp_t *lsp;
+	zebra_nhlfe_t *nhlfe;
+	const zebra_nhlfe_t *ctx_nhlfe;
+	struct nexthop *nexthop;
+	const struct nexthop *ctx_nexthop;
+	int start_count = 0, end_count = 0; /* Installed counts */
+	bool changed_p = false;
+	bool is_debug = (IS_ZEBRA_DEBUG_DPLANE | IS_ZEBRA_DEBUG_MPLS);
+
+	if (is_debug)
+		zlog_debug("LSP dplane notif, in-label %u",
+			   dplane_ctx_get_in_label(ctx));
+
+	/* Look for zebra LSP object */
+	zvrf = vrf_info_lookup(VRF_DEFAULT);
+	if (zvrf == NULL)
+		goto done;
+
+	lsp_table = zvrf->lsp_table;
+
+	tmp_ile.in_label = dplane_ctx_get_in_label(ctx);
+	lsp = hash_lookup(lsp_table, &tmp_ile);
+	if (lsp == NULL) {
+		if (is_debug)
+			zlog_debug("dplane LSP notif: in-label %u not found",
+				   dplane_ctx_get_in_label(ctx));
+		goto done;
+	}
+
+	/*
+	 * The dataplane/forwarding plane is notifying zebra about the state
+	 * of the nexthops associated with this LSP. First, we take a
+	 * pre-scan pass to determine whether the LSP has transitioned
+	 * from installed -> uninstalled. In that case, we need to have
+	 * the existing state of the LSP objects available before making
+	 * any changes.
+	 */
+	for (nhlfe = lsp->nhlfe_list; nhlfe; nhlfe = nhlfe->next) {
+		char buf[NEXTHOP_STRLEN];
+
+		nexthop = nhlfe->nexthop;
+		if (!nexthop)
+			continue;
+
+		if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_FIB))
+			start_count++;
+
+		ctx_nexthop = NULL;
+		for (ctx_nhlfe = dplane_ctx_get_nhlfe(ctx);
+		     ctx_nhlfe; ctx_nhlfe = ctx_nhlfe->next) {
+
+			ctx_nexthop = ctx_nhlfe->nexthop;
+			if (!ctx_nexthop)
 				continue;
 
-			SET_FLAG(nhlfe->flags, NHLFE_FLAG_INSTALLED);
-			SET_FLAG(nexthop->flags, NEXTHOP_FLAG_FIB);
+			if ((ctx_nexthop->type == nexthop->type) &&
+			    nexthop_same(ctx_nexthop, nexthop)) {
+				/* Matched */
+				break;
+			}
 		}
-		break;
-	case SOUTHBOUND_DELETE_SUCCESS:
+
+		if (is_debug)
+			nexthop2str(nexthop, buf, sizeof(buf));
+
+		if (ctx_nhlfe && ctx_nexthop) {
+			if (is_debug) {
+				const char *tstr = "";
+
+				if (!CHECK_FLAG(ctx_nhlfe->flags,
+						NHLFE_FLAG_INSTALLED))
+					tstr = "not ";
+
+				zlog_debug("LSP dplane notif: matched nh %s (%sinstalled)",
+					   buf, tstr);
+			}
+
+			/* Test zebra nhlfe install state */
+			if (CHECK_FLAG(ctx_nhlfe->flags,
+				       NHLFE_FLAG_INSTALLED)) {
+
+				if (!CHECK_FLAG(nhlfe->flags,
+						NHLFE_FLAG_INSTALLED))
+					changed_p = true;
+
+				/* Update counter */
+				end_count++;
+			} else {
+
+				if (CHECK_FLAG(nhlfe->flags,
+					       NHLFE_FLAG_INSTALLED))
+					changed_p = true;
+			}
+
+		} else {
+			/* Not mentioned in lfib set -> uninstalled */
+			if (CHECK_FLAG(nhlfe->flags, NHLFE_FLAG_INSTALLED) ||
+			    CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE) ||
+			    CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_FIB)) {
+				changed_p = true;
+			}
+
+			if (is_debug)
+				zlog_debug("LSP dplane notif: no match, nh %s",
+					   buf);
+		}
+	}
+
+	if (is_debug)
+		zlog_debug("LSP dplane notif: lfib start_count %d, end_count %d%s",
+			   start_count, end_count,
+			   changed_p ? ", changed" : "");
+
+	/*
+	 * Has the LSP become uninstalled?
+	 */
+	if (start_count > 0 && end_count == 0) {
+		/* Inform other lfibs */
+		dplane_lsp_notif_update(lsp, DPLANE_OP_LSP_DELETE, ctx);
+	}
+
+	/*
+	 * Now we take a second pass and bring the zebra
+	 * nexthop state into sync with the forwarding-plane state.
+	 */
+	for (nhlfe = lsp->nhlfe_list; nhlfe; nhlfe = nhlfe->next) {
+		char buf[NEXTHOP_STRLEN];
+
+		nexthop = nhlfe->nexthop;
+		if (!nexthop)
+			continue;
+
+		ctx_nexthop = NULL;
+		for (ctx_nhlfe = dplane_ctx_get_nhlfe(ctx);
+		     ctx_nhlfe; ctx_nhlfe = ctx_nhlfe->next) {
+
+			ctx_nexthop = ctx_nhlfe->nexthop;
+			if (!ctx_nexthop)
+				continue;
+
+			if ((ctx_nexthop->type == nexthop->type) &&
+			    nexthop_same(ctx_nexthop, nexthop)) {
+				/* Matched */
+				break;
+			}
+		}
+
+		if (is_debug)
+			nexthop2str(nexthop, buf, sizeof(buf));
+
+		if (ctx_nhlfe && ctx_nexthop) {
+
+			/* Bring zebra nhlfe install state into sync */
+			if (CHECK_FLAG(ctx_nhlfe->flags,
+				       NHLFE_FLAG_INSTALLED)) {
+
+				SET_FLAG(nhlfe->flags, NHLFE_FLAG_INSTALLED);
+
+			} else {
+
+				UNSET_FLAG(nhlfe->flags, NHLFE_FLAG_INSTALLED);
+			}
+
+			if (CHECK_FLAG(ctx_nhlfe->nexthop->flags,
+				       NEXTHOP_FLAG_FIB)) {
+				SET_FLAG(nhlfe->nexthop->flags,
+					 NEXTHOP_FLAG_ACTIVE);
+				SET_FLAG(nhlfe->nexthop->flags,
+					 NEXTHOP_FLAG_FIB);
+			} else {
+				UNSET_FLAG(nhlfe->nexthop->flags,
+					 NEXTHOP_FLAG_ACTIVE);
+				UNSET_FLAG(nhlfe->nexthop->flags,
+					   NEXTHOP_FLAG_FIB);
+			}
+
+		} else {
+			/* Not mentioned in lfib set -> uninstalled */
+
+			UNSET_FLAG(nhlfe->flags, NHLFE_FLAG_INSTALLED);
+			UNSET_FLAG(nexthop->flags, NEXTHOP_FLAG_FIB);
+			UNSET_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE);
+		}
+	}
+
+	if (end_count > 0) {
+		SET_FLAG(lsp->flags, LSP_FLAG_INSTALLED);
+
+		if (changed_p)
+			dplane_lsp_notif_update(lsp, DPLANE_OP_LSP_UPDATE, ctx);
+
+	} else {
 		UNSET_FLAG(lsp->flags, LSP_FLAG_INSTALLED);
 		clear_nhlfe_installed(lsp);
-		break;
-	case SOUTHBOUND_DELETE_FAILURE:
-		zlog_warn("LSP Deletion Failure: %u", lsp->ile.in_label);
-		break;
-	}
-}
-
-/*
- * String to label conversion, labels separated by '/'.
- *
- * @param label_str labels separated by /
- * @param num_labels number of labels; zero if conversion was unsuccessful
- * @param labels preallocated mpls_label_t array of size MPLS_MAX_LABELS; only
- *               modified if the conversion succeeded
- * @return  0 on success
- *         -1 if the string could not be parsed as integers
- *         -2 if a label was inside the reserved range (0-15)
- *         -3 if the number of labels given exceeds MPLS_MAX_LABELS
- */
-int mpls_str2label(const char *label_str, u_int8_t *num_labels,
-		   mpls_label_t *labels)
-{
-	char *ostr;			  // copy of label string (start)
-	char *lstr;			  // copy of label string
-	char *nump;			  // pointer to next segment
-	char *endp;			  // end pointer
-	int i;				  // for iterating label_str
-	int rc;				  // return code
-	mpls_label_t pl[MPLS_MAX_LABELS]; // parsed labels
-
-	/* labels to zero until we have a successful parse */
-	ostr = lstr = XSTRDUP(MTYPE_TMP, label_str);
-	*num_labels = 0;
-	rc = 0;
-
-	for (i = 0; i < MPLS_MAX_LABELS && lstr && !rc; i++) {
-		nump = strsep(&lstr, "/");
-		pl[i] = strtoul(nump, &endp, 10);
-
-		/* format check */
-		if (*endp != '\0')
-			rc = -1;
-		/* validity check */
-		else if (!IS_MPLS_UNRESERVED_LABEL(pl[i]))
-			rc = -2;
 	}
 
-	/* excess labels */
-	if (!rc && i == MPLS_MAX_LABELS && lstr)
-		rc = -3;
-
-	if (!rc) {
-		*num_labels = i;
-		memcpy(labels, pl, *num_labels * sizeof(mpls_label_t));
-	}
-
-	XFREE(MTYPE_TMP, ostr);
-
-	return rc;
-}
-
-/*
- * Label to string conversion, labels in string separated by '/'.
- */
-char *mpls_label2str(u_int8_t num_labels, mpls_label_t *labels, char *buf,
-		     int len, int pretty)
-{
-	char label_buf[BUFSIZ];
-	int i;
-
-	buf[0] = '\0';
-	for (i = 0; i < num_labels; i++) {
-		if (i != 0)
-			strlcat(buf, "/", len);
-		if (pretty)
-			label2str(labels[i], label_buf, sizeof(label_buf));
-		else
-			snprintf(label_buf, sizeof(label_buf), "%u", labels[i]);
-		strlcat(buf, label_buf, len);
-	}
-
-	return buf;
+done:
+	dplane_ctx_fini(&ctx);
 }
 
 /*
@@ -1793,7 +2039,7 @@ int zebra_mpls_lsp_install(struct zebra_vrf *zvrf, struct route_node *rn,
 	/* We cannot install a label forwarding entry if local label is the
 	 * implicit-null label.
 	 */
-	if (fec->label == MPLS_IMP_NULL_LABEL)
+	if (fec->label == MPLS_LABEL_IMPLICIT_NULL)
 		return 0;
 
 	if (lsp_install(zvrf, fec->label, rn, re))
@@ -1825,22 +2071,50 @@ int zebra_mpls_lsp_uninstall(struct zebra_vrf *zvrf, struct route_node *rn,
 }
 
 /*
+ * Add an NHLFE to an LSP, return the newly-added object
+ */
+zebra_nhlfe_t *zebra_mpls_lsp_add_nhlfe(zebra_lsp_t *lsp,
+					enum lsp_types_t lsp_type,
+					enum nexthop_types_t gtype,
+					union g_addr *gate,
+					ifindex_t ifindex,
+					mpls_label_t out_label)
+{
+	/* Just a public pass-through to the internal implementation */
+	return nhlfe_add(lsp, lsp_type, gtype, gate, ifindex, out_label);
+}
+
+/*
+ * Free an allocated NHLFE
+ */
+void zebra_mpls_nhlfe_del(zebra_nhlfe_t *nhlfe)
+{
+	/* Just a pass-through to the internal implementation */
+	nhlfe_del(nhlfe);
+}
+
+/*
  * Registration from a client for the label binding for a FEC. If a binding
  * already exists, it is informed to the client.
  * NOTE: If there is a manually configured label binding, that is used.
  * Otherwise, if a label index is specified, it means we have to allocate the
  * label from a locally configured label block (SRGB), if one exists and index
- * is acceptable.
+ * is acceptable. If no label index then just register the specified label.
+ * NOTE2: Either label or label_index is expected to be set to MPLS_INVALID_*
+ * by the calling function. Register requests with both will be rejected.
  */
 int zebra_mpls_fec_register(struct zebra_vrf *zvrf, struct prefix *p,
-			    u_int32_t label_index, struct zserv *client)
+			    uint32_t label, uint32_t label_index,
+			    struct zserv *client)
 {
 	struct route_table *table;
 	zebra_fec_t *fec;
 	char buf[BUFSIZ];
-	int new_client;
-	int label_change = 0;
-	u_int32_t old_label;
+	bool new_client;
+	bool label_change = false;
+	uint32_t old_label;
+	bool have_label_index = (label_index != MPLS_INVALID_LABEL_INDEX);
+	bool is_configured_fec = false; /* indicate statically configured FEC */
 
 	table = zvrf->fec_table[family2afi(PREFIX_FAMILY(p))];
 	if (!table)
@@ -1849,29 +2123,41 @@ int zebra_mpls_fec_register(struct zebra_vrf *zvrf, struct prefix *p,
 	if (IS_ZEBRA_DEBUG_MPLS)
 		prefix2str(p, buf, BUFSIZ);
 
+	if (label != MPLS_INVALID_LABEL && have_label_index) {
+		flog_err(
+			EC_ZEBRA_FEC_LABEL_INDEX_LABEL_CONFLICT,
+			"Rejecting FEC register for %s with both label %u and Label Index %u specified, client %s",
+			buf, label, label_index,
+			zebra_route_string(client->proto));
+		return -1;
+	}
+
 	/* Locate FEC */
 	fec = fec_find(table, p);
 	if (!fec) {
-		fec = fec_add(table, p, MPLS_INVALID_LABEL, 0, label_index);
+		fec = fec_add(table, p, label, 0, label_index);
 		if (!fec) {
-			prefix2str(p, buf, BUFSIZ);
-			zlog_err(
+			flog_err(
+				EC_ZEBRA_FEC_ADD_FAILED,
 				"Failed to add FEC %s upon register, client %s",
 				buf, zebra_route_string(client->proto));
 			return -1;
 		}
 
 		old_label = MPLS_INVALID_LABEL;
-		new_client = 1;
+		new_client = true;
 	} else {
+		/* Check if the FEC has been statically defined in the config */
+		is_configured_fec = fec->flags & FEC_FLAG_CONFIGURED;
 		/* Client may register same FEC with different label index. */
 		new_client =
 			(listnode_lookup(fec->client_list, client) == NULL);
-		if (!new_client && fec->label_index == label_index)
+		if (!new_client && fec->label_index == label_index
+		    && fec->label == label)
 			/* Duplicate register */
 			return 0;
 
-		/* Save current label, update label index */
+		/* Save current label, update the FEC */
 		old_label = fec->label;
 		fec->label_index = label_index;
 	}
@@ -1880,21 +2166,29 @@ int zebra_mpls_fec_register(struct zebra_vrf *zvrf, struct prefix *p,
 		listnode_add(fec->client_list, client);
 
 	if (IS_ZEBRA_DEBUG_MPLS)
-		zlog_debug("FEC %s Label Index %u %s by client %s", buf,
-			   label_index, new_client ? "registered" : "updated",
-			   zebra_route_string(client->proto));
+		zlog_debug("FEC %s label%s %u %s by client %s%s", buf,
+			   have_label_index ? " index" : "",
+			   have_label_index ? label_index : label,
+			   new_client ? "registered" : "updated",
+			   zebra_route_string(client->proto),
+			   is_configured_fec
+				   ? ", but using statically configured label"
+				   : "");
 
-	/* If not a configured FEC, derive the local label (from label index)
-	 * or reset it.
+	/* If not a statically configured FEC, derive the local label
+	 * from label index or use the provided label
 	 */
-	if (!(fec->flags & FEC_FLAG_CONFIGURED)) {
-		fec_derive_label_from_index(zvrf, fec);
+	if (!is_configured_fec) {
+		if (have_label_index)
+			fec_derive_label_from_index(zvrf, fec);
+		else
+			fec->label = label;
 
 		/* If no label change, exit. */
 		if (fec->label == old_label)
 			return 0;
 
-		label_change = 1;
+		label_change = true;
 	}
 
 	/* If new client or label change, update client and install or uninstall
@@ -1935,7 +2229,8 @@ int zebra_mpls_fec_unregister(struct zebra_vrf *zvrf, struct prefix *p,
 	fec = fec_find(table, p);
 	if (!fec) {
 		prefix2str(p, buf, BUFSIZ);
-		zlog_err("Failed to find FEC %s upon unregister, client %s",
+		flog_err(EC_ZEBRA_FEC_RM_FAILED,
+			 "Failed to find FEC %s upon unregister, client %s",
 			 buf, zebra_route_string(client->proto));
 		return -1;
 	}
@@ -1963,9 +2258,9 @@ int zebra_mpls_fec_unregister(struct zebra_vrf *zvrf, struct prefix *p,
 /*
  * Cleanup any FECs registered by this client.
  */
-int zebra_mpls_cleanup_fecs_for_client(struct zebra_vrf *zvrf,
-				       struct zserv *client)
+static int zebra_mpls_cleanup_fecs_for_client(struct zserv *client)
 {
+	struct zebra_vrf *zvrf = vrf_info_lookup(VRF_DEFAULT);
 	struct route_node *rn;
 	zebra_fec_t *fec;
 	struct listnode *node;
@@ -2066,7 +2361,8 @@ int zebra_mpls_static_fec_add(struct zebra_vrf *zvrf, struct prefix *p,
 			      MPLS_INVALID_LABEL_INDEX);
 		if (!fec) {
 			prefix2str(p, buf, BUFSIZ);
-			zlog_err("Failed to add FEC %s upon config", buf);
+			flog_err(EC_ZEBRA_FEC_ADD_FAILED,
+				 "Failed to add FEC %s upon config", buf);
 			return -1;
 		}
 
@@ -2113,14 +2409,15 @@ int zebra_mpls_static_fec_del(struct zebra_vrf *zvrf, struct prefix *p)
 	fec = fec_find(table, p);
 	if (!fec) {
 		prefix2str(p, buf, BUFSIZ);
-		zlog_err("Failed to find FEC %s upon delete", buf);
+		flog_err(EC_ZEBRA_FEC_RM_FAILED,
+			 "Failed to find FEC %s upon delete", buf);
 		return -1;
 	}
 
 	if (IS_ZEBRA_DEBUG_MPLS) {
 		prefix2str(p, buf, BUFSIZ);
-		zlog_debug("Delete fec %s label index %u", buf,
-			   fec->label_index);
+		zlog_debug("Delete fec %s label %u label index %u", buf,
+			   fec->label, fec->label_index);
 	}
 
 	old_label = fec->label;
@@ -2227,18 +2524,32 @@ void zebra_mpls_print_fec(struct vty *vty, struct zebra_vrf *zvrf,
 	fec_print(rn->info, vty);
 }
 
+static bool mpls_ftn_update_nexthop(int add, struct nexthop *nexthop,
+				    enum lsp_types_t type, mpls_label_t label)
+{
+	if (add && nexthop->nh_label_type == ZEBRA_LSP_NONE)
+		nexthop_add_labels(nexthop, type, 1, &label);
+	else if (!add && nexthop->nh_label_type == type)
+		nexthop_del_labels(nexthop);
+	else
+		return false;
+
+	return true;
+}
+
 /*
  * Install/uninstall a FEC-To-NHLFE (FTN) binding.
  */
 int mpls_ftn_update(int add, struct zebra_vrf *zvrf, enum lsp_types_t type,
 		    struct prefix *prefix, enum nexthop_types_t gtype,
-		    union g_addr *gate, ifindex_t ifindex, u_int8_t distance,
+		    union g_addr *gate, ifindex_t ifindex, uint8_t distance,
 		    mpls_label_t out_label)
 {
 	struct route_table *table;
 	struct route_node *rn;
 	struct route_entry *re;
 	struct nexthop *nexthop;
+	bool found;
 
 	/* Lookup table.  */
 	table = zebra_vrf_table(family2afi(prefix->family), SAFI_UNICAST,
@@ -2258,7 +2569,8 @@ int mpls_ftn_update(int add, struct zebra_vrf *zvrf, enum lsp_types_t type,
 	if (re == NULL)
 		return -1;
 
-	for (nexthop = re->nexthop; nexthop; nexthop = nexthop->next) {
+	found = false;
+	for (nexthop = re->ng.nexthop; nexthop; nexthop = nexthop->next) {
 		switch (nexthop->type) {
 		case NEXTHOP_TYPE_IPV4:
 		case NEXTHOP_TYPE_IPV4_IFINDEX:
@@ -2270,7 +2582,11 @@ int mpls_ftn_update(int add, struct zebra_vrf *zvrf, enum lsp_types_t type,
 			if (nexthop->type == NEXTHOP_TYPE_IPV4_IFINDEX
 			    && nexthop->ifindex != ifindex)
 				continue;
-			goto found;
+			if (!mpls_ftn_update_nexthop(add, nexthop, type,
+						     out_label))
+				return 0;
+			found = true;
+			break;
 		case NEXTHOP_TYPE_IPV6:
 		case NEXTHOP_TYPE_IPV6_IFINDEX:
 			if (gtype != NEXTHOP_TYPE_IPV6
@@ -2281,21 +2597,18 @@ int mpls_ftn_update(int add, struct zebra_vrf *zvrf, enum lsp_types_t type,
 			if (nexthop->type == NEXTHOP_TYPE_IPV6_IFINDEX
 			    && nexthop->ifindex != ifindex)
 				continue;
-			goto found;
+			if (!mpls_ftn_update_nexthop(add, nexthop, type,
+						     out_label))
+				return 0;
+			found = true;
+			break;
 		default:
 			break;
 		}
 	}
-	/* nexthop not found */
-	return -1;
 
-found:
-	if (add && nexthop->nh_label_type == ZEBRA_LSP_NONE)
-		nexthop_add_labels(nexthop, type, 1, &out_label);
-	else if (!add && nexthop->nh_label_type == type)
-		nexthop_del_labels(nexthop);
-	else
-		return 0;
+	if (!found)
+		return -1;
 
 	SET_FLAG(re->status, ROUTE_ENTRY_CHANGED);
 	SET_FLAG(re->status, ROUTE_ENTRY_LABELS_CHANGED);
@@ -2430,8 +2743,7 @@ int mpls_lsp_uninstall(struct zebra_vrf *zvrf, enum lsp_types_t type,
 					   lsp->ile.in_label, lsp->flags);
 
 			lsp = hash_release(lsp_table, &lsp->ile);
-			if (lsp)
-				XFREE(MTYPE_LSP, lsp);
+			XFREE(MTYPE_LSP, lsp);
 		}
 	}
 	return 0;
@@ -2441,13 +2753,13 @@ int mpls_lsp_uninstall(struct zebra_vrf *zvrf, enum lsp_types_t type,
  * Uninstall all LDP NHLFEs for a particular LSP forwarding entry.
  * If no other NHLFEs exist, the entry would be deleted.
  */
-void mpls_ldp_lsp_uninstall_all(struct hash_backet *backet, void *ctxt)
+void mpls_ldp_lsp_uninstall_all(struct hash_bucket *bucket, void *ctxt)
 {
 	zebra_lsp_t *lsp;
 	struct hash *lsp_table;
 
-	lsp = (zebra_lsp_t *)backet->data;
-	if (!lsp || !lsp->nhlfe_list)
+	lsp = (zebra_lsp_t *)bucket->data;
+	if (!lsp->nhlfe_list)
 		return;
 
 	lsp_table = ctxt;
@@ -2476,7 +2788,7 @@ void mpls_ldp_ftn_uninstall_all(struct zebra_vrf *zvrf, int afi)
 	for (rn = route_top(table); rn; rn = route_next(rn)) {
 		update = 0;
 		RNODE_FOREACH_RE (rn, re) {
-			for (nexthop = re->nexthop; nexthop;
+			for (nexthop = re->ng.nexthop; nexthop;
 			     nexthop = nexthop->next) {
 				if (nexthop->nh_label_type != ZEBRA_LSP_LDP)
 					continue;
@@ -2537,8 +2849,8 @@ int zebra_mpls_lsp_label_consistent(struct zebra_vrf *zvrf,
 			int cur_op, new_op;
 
 			cur_op = (slsp->snhlfe_list->out_label
-				  == MPLS_IMP_NULL_LABEL);
-			new_op = (out_label == MPLS_IMP_NULL_LABEL);
+				  == MPLS_LABEL_IMPLICIT_NULL);
+			new_op = (out_label == MPLS_LABEL_IMPLICIT_NULL);
 			if (cur_op != new_op)
 				return 0;
 		}
@@ -2675,8 +2987,7 @@ int zebra_mpls_static_lsp_del(struct zebra_vrf *zvrf, mpls_label_t in_label,
 	 * above. */
 	if (!slsp->snhlfe_list) {
 		slsp = hash_release(slsp_table, &tmp_ile);
-		if (slsp)
-			XFREE(MTYPE_SLSP, slsp);
+		XFREE(MTYPE_SLSP, slsp);
 	}
 
 	return 0;
@@ -2699,7 +3010,7 @@ void zebra_mpls_lsp_schedule(struct zebra_vrf *zvrf)
  * (VTY command handler).
  */
 void zebra_mpls_print_lsp(struct vty *vty, struct zebra_vrf *zvrf,
-			  mpls_label_t label, u_char use_json)
+			  mpls_label_t label, bool use_json)
 {
 	struct hash *lsp_table;
 	zebra_lsp_t *lsp;
@@ -2730,7 +3041,7 @@ void zebra_mpls_print_lsp(struct vty *vty, struct zebra_vrf *zvrf,
  * Display MPLS label forwarding table (VTY command handler).
  */
 void zebra_mpls_print_lsp_table(struct vty *vty, struct zebra_vrf *zvrf,
-				u_char use_json)
+				bool use_json)
 {
 	char buf[BUFSIZ];
 	json_object *json = NULL;
@@ -2764,6 +3075,21 @@ void zebra_mpls_print_lsp_table(struct vty *vty, struct zebra_vrf *zvrf,
 				nexthop = nhlfe->nexthop;
 
 				switch (nexthop->type) {
+				case NEXTHOP_TYPE_IFINDEX: {
+					struct zebra_ns *zns;
+					struct interface *ifp;
+
+					zns = zebra_ns_lookup(NS_DEFAULT);
+					ifp = if_lookup_by_index_per_ns(
+							zns,
+							nexthop->ifindex);
+					if (ifp)
+						vty_out(vty, "%15s", ifp->name);
+					else
+						vty_out(vty, "%15s", "Null");
+
+					break;
+				}
 				case NEXTHOP_TYPE_IPV4:
 				case NEXTHOP_TYPE_IPV4_IFINDEX:
 					vty_out(vty, "%15s",
@@ -2780,15 +3106,23 @@ void zebra_mpls_print_lsp_table(struct vty *vty, struct zebra_vrf *zvrf,
 					break;
 				}
 
-				vty_out(vty, "  %8d\n",
-					nexthop->nh_label->label[0]);
+				if (nexthop->type != NEXTHOP_TYPE_IFINDEX)
+					vty_out(vty, "  %8s\n",
+						mpls_label2str(
+							nexthop->nh_label
+								->num_labels,
+							&nexthop->nh_label
+								 ->label[0],
+							buf, BUFSIZ, 1));
+				else
+					vty_out(vty, "\n");
 			}
 		}
 
 		vty_out(vty, "\n");
 	}
 
-	list_delete_and_null(&lsp_list);
+	list_delete(&lsp_list);
 }
 
 /*
@@ -2810,11 +3144,11 @@ int zebra_mpls_write_lsp_config(struct vty *vty, struct zebra_vrf *zvrf)
 
 			snhlfe2str(snhlfe, buf, sizeof(buf));
 			switch (snhlfe->out_label) {
-			case MPLS_V4_EXP_NULL_LABEL:
-			case MPLS_V6_EXP_NULL_LABEL:
+			case MPLS_LABEL_IPV4_EXPLICIT_NULL:
+			case MPLS_LABEL_IPV6_EXPLICIT_NULL:
 				strlcpy(lstr, "explicit-null", sizeof(lstr));
 				break;
-			case MPLS_IMP_NULL_LABEL:
+			case MPLS_LABEL_IMPLICIT_NULL:
 				strlcpy(lstr, "implicit-null", sizeof(lstr));
 				break;
 			default:
@@ -2827,15 +3161,15 @@ int zebra_mpls_write_lsp_config(struct vty *vty, struct zebra_vrf *zvrf)
 		}
 	}
 
-	list_delete_and_null(&slsp_list);
+	list_delete(&slsp_list);
 	return (zvrf->slsp_table->count ? 1 : 0);
 }
 
 /*
  * Add/update global label block.
  */
-int zebra_mpls_label_block_add(struct zebra_vrf *zvrf, u_int32_t start_label,
-			       u_int32_t end_label)
+int zebra_mpls_label_block_add(struct zebra_vrf *zvrf, uint32_t start_label,
+			       uint32_t end_label)
 {
 	zvrf->mpls_srgb.start_label = start_label;
 	zvrf->mpls_srgb.end_label = end_label;
@@ -2876,6 +3210,35 @@ int zebra_mpls_write_label_block_config(struct vty *vty, struct zebra_vrf *zvrf)
 }
 
 /*
+ * Called when VRF becomes inactive, cleans up information but keeps
+ * the table itself.
+ */
+void zebra_mpls_cleanup_tables(struct zebra_vrf *zvrf)
+{
+	struct zebra_vrf *def_zvrf;
+	afi_t afi;
+
+	if (zvrf_id(zvrf) == VRF_DEFAULT)
+		hash_iterate(zvrf->lsp_table, lsp_uninstall_from_kernel, NULL);
+	else {
+		/*
+		 * For other vrfs, we try to remove associated LSPs; we locate
+		 * the LSPs in the default vrf.
+		 */
+		def_zvrf = zebra_vrf_lookup_by_id(VRF_DEFAULT);
+
+		/* At shutdown, the default may be gone already */
+		if (def_zvrf == NULL)
+			return;
+
+		for (afi = AFI_IP; afi < AFI_MAX; afi++) {
+			if (zvrf->label[afi] != MPLS_LABEL_NONE)
+				lsp_uninstall(def_zvrf, zvrf->label[afi]);
+		}
+	}
+}
+
+/*
  * Called upon process exiting, need to delete LSP forwarding
  * entries from the kernel.
  * NOTE: Currently supported only for default VRF.
@@ -2899,12 +3262,9 @@ void zebra_mpls_init_tables(struct zebra_vrf *zvrf)
 {
 	if (!zvrf)
 		return;
-	zvrf->slsp_table = hash_create(label_hash,
-				       label_cmp,
-				       "ZEBRA SLSP table");
-	zvrf->lsp_table = hash_create(label_hash,
-				      label_cmp,
-				      "ZEBRA LSP table");
+	zvrf->slsp_table =
+		hash_create(label_hash, label_cmp, "ZEBRA SLSP table");
+	zvrf->lsp_table = hash_create(label_hash, label_cmp, "ZEBRA LSP table");
 	zvrf->fec_table[AFI_IP] = route_table_init();
 	zvrf->fec_table[AFI_IP6] = route_table_init();
 	zvrf->mpls_flags = 0;
@@ -2920,10 +3280,13 @@ void zebra_mpls_init(void)
 	mpls_enabled = 0;
 
 	if (mpls_kernel_init() < 0) {
-		zlog_warn("Disabling MPLS support (no kernel support)");
+		flog_warn(EC_ZEBRA_MPLS_SUPPORT_DISABLED,
+			  "Disabling MPLS support (no kernel support)");
 		return;
 	}
 
-	if (!mpls_processq_init(&zebrad))
+	if (!mpls_processq_init())
 		mpls_enabled = 1;
+
+	hook_register(zserv_client_close, zebra_mpls_cleanup_fecs_for_client);
 }

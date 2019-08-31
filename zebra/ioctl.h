@@ -22,25 +22,24 @@
 #ifndef _ZEBRA_IOCTL_H
 #define _ZEBRA_IOCTL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Prototypes. */
 extern void ifreq_set_name(struct ifreq *, struct interface *);
-extern int if_ioctl(u_long, caddr_t);
+extern int if_ioctl(unsigned long, caddr_t);
+extern int vrf_if_ioctl(unsigned long request, caddr_t buffer, vrf_id_t vrf_id);
 
 extern int if_set_flags(struct interface *, uint64_t);
 extern int if_unset_flags(struct interface *, uint64_t);
 extern void if_get_flags(struct interface *);
 
-extern int if_set_prefix(struct interface *, struct connected *);
-extern int if_unset_prefix(struct interface *, struct connected *);
-
 extern void if_get_metric(struct interface *);
 extern void if_get_mtu(struct interface *);
 
-extern int if_prefix_add_ipv6(struct interface *, struct connected *);
-extern int if_prefix_delete_ipv6(struct interface *, struct connected *);
-
 #ifdef SOLARIS_IPV6
-extern int if_ioctl_ipv6(u_long, caddr_t);
+extern int if_ioctl_ipv6(unsigned long, caddr_t);
 extern struct connected *if_lookup_linklocal(struct interface *);
 
 #define AF_IOCTL(af, request, buffer)                                          \
@@ -51,5 +50,9 @@ extern struct connected *if_lookup_linklocal(struct interface *);
 #define AF_IOCTL(af, request, buffer)  if_ioctl(request, buffer)
 
 #endif /* SOLARIS_IPV6 */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ZEBRA_IOCTL_H */

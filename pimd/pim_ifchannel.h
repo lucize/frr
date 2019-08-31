@@ -111,10 +111,9 @@ struct pim_ifchannel {
 };
 
 RB_HEAD(pim_ifchannel_rb, pim_ifchannel);
-RB_PROTOTYPE(pim_ifchannel_rb, pim_ifchannel,
-	     pim_ifp_rb, pim_ifchannel_compare);
+RB_PROTOTYPE(pim_ifchannel_rb, pim_ifchannel, pim_ifp_rb,
+	     pim_ifchannel_compare);
 
-void pim_ifchannel_free(struct pim_ifchannel *ch);
 void pim_ifchannel_delete(struct pim_ifchannel *ch);
 void pim_ifchannel_delete_all(struct interface *ifp);
 void pim_ifchannel_membership_clear(struct interface *ifp);
@@ -156,5 +155,5 @@ void pim_ifchannel_set_star_g_join_state(struct pim_ifchannel *ch, int eom,
 int pim_ifchannel_compare(const struct pim_ifchannel *ch1,
 			  const struct pim_ifchannel *ch2);
 
-unsigned int pim_ifchannel_hash_key(void *arg);
+unsigned int pim_ifchannel_hash_key(const void *arg);
 #endif /* PIM_IFCHANNEL_H */

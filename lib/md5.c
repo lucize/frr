@@ -1,7 +1,3 @@
-/* $USAGI: md5.c,v 1.2 2000/11/02 11:59:24 yoshfuji Exp $ */
-/*	$KAME: md5.c,v 1.2 2000/05/27 07:07:48 jinmei Exp $	*/
-/*	$Id: md5.c,v 1.6 2006/01/17 23:39:04 vincent Exp $ */
-
 /*
  * Copyright (C) 2004 6WIND
  *                          <Vincent.Jardin@6WIND.com>
@@ -379,13 +375,8 @@ static void md5_calc(const uint8_t *b64, md5_ctxt *ctxt)
 }
 
 /* From RFC 2104 */
-void hmac_md5(text, text_len, key, key_len,
-	      digest) unsigned char *text; /* pointer to data stream */
-int text_len;				   /* length of data stream */
-unsigned char *key;			   /* pointer to authentication key */
-int key_len;				   /* length of authentication key */
-uint8_t *digest;			   /* caller digest to be filled in */
-
+void hmac_md5(unsigned char *text, int text_len, unsigned char *key,
+	      int key_len, uint8_t *digest)
 {
 	MD5_CTX context;
 	unsigned char k_ipad[65]; /* inner padding -

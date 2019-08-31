@@ -37,7 +37,7 @@ enqueue_pdu(struct nbr *nbr, uint16_t type, struct ibuf *buf, uint16_t size)
 	struct ldp_hdr		*ldp_hdr;
 
 	ldp_hdr = ibuf_seek(buf, 0, sizeof(struct ldp_hdr));
-	ldp_hdr->length = htons(size);
+	ldp_hdr->length = htons(size - LDP_HDR_DEAD_LEN);
 	evbuf_enqueue(&nbr->tcp->wbuf, buf);
 }
 
@@ -65,7 +65,7 @@ send_labelmessage(struct nbr *nbr, uint16_t type, struct mapping_head *mh)
 			/* real size will be set up later */
 			err |= gen_ldp_hdr(buf, 0);
 
-			size = LDP_HDR_PDU_LEN;
+			size = LDP_HDR_SIZE;
 			first = 0;
 		}
 
@@ -320,9 +320,9 @@ recv_labelmessage(struct nbr *nbr, char *buf, uint16_t len, uint16_t type)
 				/* do not accept invalid labels */
 				if (label > MPLS_LABEL_MAX ||
 				    (label <= MPLS_LABEL_RESERVED_MAX &&
-				     label != MPLS_LABEL_IPV4NULL &&
-				     label != MPLS_LABEL_IPV6NULL &&
-				     label != MPLS_LABEL_IMPLNULL)) {
+				     label != MPLS_LABEL_IPV4_EXPLICIT_NULL &&
+				     label != MPLS_LABEL_IPV6_EXPLICIT_NULL &&
+				     label != MPLS_LABEL_IMPLICIT_NULL)) {
 					session_shutdown(nbr, S_BAD_TLV_VAL,
 					    msg.id, msg.type);
 					goto err;
@@ -396,7 +396,7 @@ recv_labelmessage(struct nbr *nbr, char *buf, uint16_t len, uint16_t type)
 		case MAP_TYPE_PREFIX:
 			switch (me->map.fec.prefix.af) {
 			case AF_INET:
-				if (label == MPLS_LABEL_IPV6NULL) {
+				if (label == MPLS_LABEL_IPV6_EXPLICIT_NULL) {
 					session_shutdown(nbr, S_BAD_TLV_VAL,
 					    msg.id, msg.type);
 					goto err;
@@ -405,7 +405,7 @@ recv_labelmessage(struct nbr *nbr, char *buf, uint16_t len, uint16_t type)
 					goto next;
 				break;
 			case AF_INET6:
-				if (label == MPLS_LABEL_IPV4NULL) {
+				if (label == MPLS_LABEL_IPV4_EXPLICIT_NULL) {
 					session_shutdown(nbr, S_BAD_TLV_VAL,
 					    msg.id, msg.type);
 					goto err;

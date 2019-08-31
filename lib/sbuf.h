@@ -23,6 +23,10 @@
 #ifndef SBUF_H
 #define SBUF_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * sbuf provides a simple string buffer. One application where this comes
  * in handy is the parsing of binary data: If there is an error in the parsing
@@ -53,8 +57,10 @@
  *         return 1;
  * }
  *
- * In this case, sbuf_example uses a string buffer with undefined size, which will
- * be allocated on the heap by sbuf. The caller of sbuf_example is expected to free
+ * In this case, sbuf_example uses a string buffer with undefined size, which
+ * will
+ * be allocated on the heap by sbuf. The caller of sbuf_example is expected to
+ * free
  * the string returned in parser_log.
  */
 
@@ -72,6 +78,10 @@ const char *sbuf_buf(struct sbuf *buf);
 void sbuf_free(struct sbuf *buf);
 #include "lib/log.h"
 void sbuf_push(struct sbuf *buf, int indent, const char *format, ...)
-	PRINTF_ATTRIBUTE(3, 4);
+	PRINTFRR(3, 4);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -31,8 +31,8 @@
 #include "network.h"
 #include "stream.h"
 #include "if.h"
+#include "lib_errors.h"
 
-#include "isisd/dict.h"
 #include "isisd/isis_constants.h"
 #include "isisd/isis_common.h"
 #include "isisd/isis_circuit.h"
@@ -45,17 +45,16 @@
 #include "privs.h"
 
 /* tcpdump -i eth0 'isis' -dd */
-static struct sock_filter isisfilter[] =
-	{
-		/* NB: we're in SOCK_DGRAM, so src/dst mac + length are stripped
-		 * off!
-		 * (OTOH it's a bit more lower-layer agnostic and might work
-		 * over GRE?) */
-		/*	{ 0x28, 0, 0, 0x0000000c - 14 }, */
-		/*	{ 0x25, 5, 0, 0x000005dc }, */
-		{0x28, 0, 0, 0x0000000e - 14}, {0x15, 0, 3, 0x0000fefe},
-		{0x30, 0, 0, 0x00000011 - 14}, {0x15, 0, 1, 0x00000083},
-		{0x6, 0, 0, 0x00040000},       {0x6, 0, 0, 0x00000000},
+static struct sock_filter isisfilter[] = {
+	/* NB: we're in SOCK_DGRAM, so src/dst mac + length are stripped
+	 * off!
+	 * (OTOH it's a bit more lower-layer agnostic and might work
+	 * over GRE?) */
+	/*	{ 0x28, 0, 0, 0x0000000c - 14 }, */
+	/*	{ 0x25, 5, 0, 0x000005dc }, */
+	{0x28, 0, 0, 0x0000000e - 14}, {0x15, 0, 3, 0x0000fefe},
+	{0x30, 0, 0, 0x00000011 - 14}, {0x15, 0, 1, 0x00000083},
+	{0x6, 0, 0, 0x00040000},       {0x6, 0, 0, 0x00000000},
 };
 
 static struct sock_fprog bpf = {
@@ -68,13 +67,12 @@ static struct sock_fprog bpf = {
  * ISO 10589 - 8.4.8
  */
 
-u_char ALL_L1_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x14};
-u_char ALL_L2_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x15};
-u_char ALL_ISS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x05};
-u_char ALL_ESS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x04};
+uint8_t ALL_L1_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x14};
+uint8_t ALL_L2_ISS[6] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x15};
+uint8_t ALL_ISS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x05};
+uint8_t ALL_ESS[6] = {0x09, 0x00, 0x2B, 0x00, 0x00, 0x04};
 
 static uint8_t discard_buff[8192];
-static uint8_t sock_buff[8192];
 
 /*
  * if level is 0 we are joining p2p multicast
@@ -185,39 +183,34 @@ int isis_sock_init(struct isis_circuit *circuit)
 {
 	int retval = ISIS_OK;
 
-	if (isisd_privs.change(ZPRIVS_RAISE))
-		zlog_err("%s: could not raise privs, %s", __func__,
-			 safe_strerror(errno));
+	frr_elevate_privs(&isisd_privs) {
 
-	retval = open_packet_socket(circuit);
+		retval = open_packet_socket(circuit);
 
-	if (retval != ISIS_OK) {
-		zlog_warn("%s: could not initialize the socket", __func__);
-		goto end;
-	}
+		if (retval != ISIS_OK) {
+			zlog_warn("%s: could not initialize the socket",
+				  __func__);
+			break;
+		}
 
 	/* Assign Rx and Tx callbacks are based on real if type */
-	if (if_is_broadcast(circuit->interface)) {
-		circuit->tx = isis_send_pdu_bcast;
-		circuit->rx = isis_recv_pdu_bcast;
-	} else if (if_is_pointopoint(circuit->interface)) {
-		circuit->tx = isis_send_pdu_p2p;
-		circuit->rx = isis_recv_pdu_p2p;
-	} else {
-		zlog_warn("isis_sock_init(): unknown circuit type");
-		retval = ISIS_WARNING;
-		goto end;
+		if (if_is_broadcast(circuit->interface)) {
+			circuit->tx = isis_send_pdu_bcast;
+			circuit->rx = isis_recv_pdu_bcast;
+		} else if (if_is_pointopoint(circuit->interface)) {
+			circuit->tx = isis_send_pdu_p2p;
+			circuit->rx = isis_recv_pdu_p2p;
+		} else {
+			zlog_warn("isis_sock_init(): unknown circuit type");
+			retval = ISIS_WARNING;
+			break;
+		}
 	}
-
-end:
-	if (isisd_privs.change(ZPRIVS_LOWER))
-		zlog_err("%s: could not lower privs, %s", __func__,
-			 safe_strerror(errno));
 
 	return retval;
 }
 
-static inline int llc_check(u_char *llc)
+static inline int llc_check(uint8_t *llc)
 {
 	if (*llc != ISO_SAP || *(llc + 1) != ISO_SAP || *(llc + 2) != 3)
 		return 0;
@@ -225,11 +218,11 @@ static inline int llc_check(u_char *llc)
 	return 1;
 }
 
-int isis_recv_pdu_bcast(struct isis_circuit *circuit, u_char *ssnpa)
+int isis_recv_pdu_bcast(struct isis_circuit *circuit, uint8_t *ssnpa)
 {
 	int bytesread, addr_len;
 	struct sockaddr_ll s_addr;
-	u_char llc[LLC_LEN];
+	uint8_t llc[LLC_LEN];
 
 	addr_len = sizeof(s_addr);
 
@@ -283,25 +276,28 @@ int isis_recv_pdu_bcast(struct isis_circuit *circuit, u_char *ssnpa)
 		return ISIS_WARNING;
 	}
 
-	/* on lan we have to read to the static buff first */
-	bytesread = recvfrom(circuit->fd, sock_buff, sizeof(sock_buff),
-			     MSG_DONTWAIT, (struct sockaddr *)&s_addr,
-			     (socklen_t *)&addr_len);
+	/* Ensure that we have enough space for a pdu padded to fill the mtu */
+	unsigned int max_size =
+		circuit->interface->mtu > circuit->interface->mtu6
+			? circuit->interface->mtu
+			: circuit->interface->mtu6;
+	uint8_t temp_buff[max_size];
+	bytesread =
+		recvfrom(circuit->fd, temp_buff, max_size, MSG_DONTWAIT,
+			 (struct sockaddr *)&s_addr, (socklen_t *)&addr_len);
 	if (bytesread < 0) {
-		zlog_warn("isis_recv_pdu_bcast(): recvfrom() failed");
+		zlog_warn("%s: recvfrom() failed", __func__);
 		return ISIS_WARNING;
 	}
-
 	/* then we lose the LLC */
-	stream_write(circuit->rcv_stream, sock_buff + LLC_LEN,
+	stream_write(circuit->rcv_stream, temp_buff + LLC_LEN,
 		     bytesread - LLC_LEN);
-
 	memcpy(ssnpa, &s_addr.sll_addr, s_addr.sll_halen);
 
 	return ISIS_OK;
 }
 
-int isis_recv_pdu_p2p(struct isis_circuit *circuit, u_char *ssnpa)
+int isis_recv_pdu_p2p(struct isis_circuit *circuit, uint8_t *ssnpa)
 {
 	int bytesread, addr_len;
 	struct sockaddr_ll s_addr;
@@ -310,9 +306,9 @@ int isis_recv_pdu_p2p(struct isis_circuit *circuit, u_char *ssnpa)
 	addr_len = sizeof(s_addr);
 
 	/* we can read directly to the stream */
-	stream_recvfrom(circuit->rcv_stream, circuit->fd,
-			circuit->interface->mtu, 0, (struct sockaddr *)&s_addr,
-			(socklen_t *)&addr_len);
+	(void)stream_recvfrom(
+		circuit->rcv_stream, circuit->fd, circuit->interface->mtu, 0,
+		(struct sockaddr *)&s_addr, (socklen_t *)&addr_len);
 
 	if (s_addr.sll_pkttype == PACKET_OUTGOING) {
 		/*  Read the packet into discard buff */
@@ -343,6 +339,7 @@ int isis_send_pdu_bcast(struct isis_circuit *circuit, int level)
 {
 	struct msghdr msg;
 	struct iovec iov[2];
+	char temp_buff[LLC_LEN];
 
 	/* we need to do the LLC in here because of P2P circuits, which will
 	 * not need it
@@ -367,16 +364,16 @@ int isis_send_pdu_bcast(struct isis_circuit *circuit, int level)
 
 	/* on a broadcast circuit */
 	/* first we put the LLC in */
-	sock_buff[0] = 0xFE;
-	sock_buff[1] = 0xFE;
-	sock_buff[2] = 0x03;
+	temp_buff[0] = 0xFE;
+	temp_buff[1] = 0xFE;
+	temp_buff[2] = 0x03;
 
 	memset(&msg, 0, sizeof(msg));
 	msg.msg_name = &sa;
 	msg.msg_namelen = sizeof(struct sockaddr_ll);
 	msg.msg_iov = iov;
 	msg.msg_iovlen = 2;
-	iov[0].iov_base = sock_buff;
+	iov[0].iov_base = temp_buff;
 	iov[0].iov_len = LLC_LEN;
 	iov[1].iov_base = circuit->snd_stream->data;
 	iov[1].iov_len = stream_get_endp(circuit->snd_stream);

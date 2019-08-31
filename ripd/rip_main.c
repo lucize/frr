@@ -34,15 +34,17 @@
 #include "sigevent.h"
 #include "zclient.h"
 #include "vrf.h"
+#include "if_rmap.h"
 #include "libfrr.h"
 
 #include "ripd/ripd.h"
+#include "ripd/rip_errors.h"
 
 /* ripd options. */
-static struct option longopts[] = {{"retain", no_argument, NULL, 'r'}, {0}};
+static struct option longopts[] = {{0}};
 
 /* ripd privileges */
-zebra_capabilities_t _caps_p[] = {ZCAP_NET_RAW, ZCAP_BIND};
+zebra_capabilities_t _caps_p[] = {ZCAP_NET_RAW, ZCAP_BIND, ZCAP_SYS_ADMIN};
 
 struct zebra_privs_t ripd_privs = {
 #if defined(FRR_USER)
@@ -55,11 +57,8 @@ struct zebra_privs_t ripd_privs = {
 	.vty_group = VTY_GROUP,
 #endif
 	.caps_p = _caps_p,
-	.cap_num_p = 2,
+	.cap_num_p = array_size(_caps_p),
 	.cap_num_i = 0};
-
-/* Route retain mode flag. */
-int retain_mode = 0;
 
 /* Master of threads. */
 struct thread_master *master;
@@ -70,14 +69,9 @@ static struct frr_daemon_info ripd_di;
 static void sighup(void)
 {
 	zlog_info("SIGHUP received");
-	rip_clean();
-	rip_reset();
-	zlog_info("ripd restarting!");
 
 	/* Reload config file. */
-	vty_read_config(ripd_di.config_file, config_default);
-
-	/* Try to return to normal operation. */
+	vty_read_config(NULL, ripd_di.config_file, config_default);
 }
 
 /* SIGINT handler. */
@@ -85,9 +79,8 @@ static void sigint(void)
 {
 	zlog_notice("Terminating on signal");
 
-	if (!retain_mode)
-		rip_clean();
-
+	rip_vrf_terminate();
+	if_rmap_terminate();
 	rip_zclient_stop();
 	frr_fini();
 
@@ -119,21 +112,28 @@ static struct quagga_signal_t ripd_signals[] = {
 	},
 };
 
+static const struct frr_yang_module_info *ripd_yang_modules[] = {
+	&frr_interface_info,
+	&frr_ripd_info,
+};
+
 FRR_DAEMON_INFO(ripd, RIP, .vty_port = RIP_VTY_PORT,
 
 		.proghelp = "Implementation of the RIP routing protocol.",
 
 		.signals = ripd_signals, .n_signals = array_size(ripd_signals),
 
-		.privs = &ripd_privs, )
+		.privs = &ripd_privs, .yang_modules = ripd_yang_modules,
+		.n_yang_modules = array_size(ripd_yang_modules), )
+
+#define DEPRECATED_OPTIONS ""
 
 /* Main routine of ripd. */
 int main(int argc, char **argv)
 {
 	frr_preinit(&ripd_di, argc, argv);
-	frr_opt_add(
-		"r", longopts,
-		"  -r, --retain       When program terminates, retain added route by ripd.\n");
+
+	frr_opt_add("" DEPRECATED_OPTIONS, longopts, "");
 
 	/* Command line option parse. */
 	while (1) {
@@ -141,14 +141,18 @@ int main(int argc, char **argv)
 
 		opt = frr_getopt(argc, argv, NULL);
 
+		if (opt && opt < 128 && strchr(DEPRECATED_OPTIONS, opt)) {
+			fprintf(stderr,
+				"The -%c option no longer exists.\nPlease refer to the manual.\n",
+				opt);
+			continue;
+		}
+
 		if (opt == EOF)
 			break;
 
 		switch (opt) {
 		case 0:
-			break;
-		case 'r':
-			retain_mode = 1;
 			break;
 		default:
 			frr_help_exit(1);
@@ -160,14 +164,15 @@ int main(int argc, char **argv)
 	master = frr_init();
 
 	/* Library initialization. */
+	rip_error_init();
 	keychain_init();
-	vrf_init(NULL, NULL, NULL, NULL);
+	rip_vrf_init();
 
 	/* RIP related initialization. */
 	rip_init();
 	rip_if_init();
+	rip_cli_init();
 	rip_zclient_init(master);
-	rip_peer_init();
 
 	frr_config_fork();
 	frr_run(master);

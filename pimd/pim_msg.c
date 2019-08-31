@@ -39,7 +39,7 @@
 #include "pim_oil.h"
 
 void pim_msg_build_header(uint8_t *pim_msg, size_t pim_msg_size,
-			  uint8_t pim_msg_type)
+			  uint8_t pim_msg_type, bool no_fwd)
 {
 	struct pim_msg_header *header = (struct pim_msg_header *)pim_msg;
 
@@ -48,6 +48,7 @@ void pim_msg_build_header(uint8_t *pim_msg, size_t pim_msg_size,
 	 */
 	header->ver = PIM_PROTO_VERSION;
 	header->type = pim_msg_type;
+	header->Nbit = no_fwd;
 	header->reserved = 0;
 
 
@@ -114,7 +115,7 @@ size_t pim_msg_get_jp_group_size(struct list *sources)
 	size += sizeof(struct pim_encoded_source_ipv4) * sources->count;
 
 	js = listgetdata(listhead(sources));
-	if (js && js->up->sg.src.s_addr == INADDR_ANY) {
+	if (js && js->up->sg.src.s_addr == INADDR_ANY && js->is_join) {
 		struct pim_upstream *child, *up;
 		struct listnode *up_node;
 

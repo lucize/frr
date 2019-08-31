@@ -77,8 +77,8 @@
  * used for Traffic Engineering.
  */
 struct subtlv_header {
-	u_char type;   /* sub_TLV_XXX type (see above) */
-	u_char length; /* Value portion only, in byte */
+	uint8_t type;   /* sub_TLV_XXX type (see above) */
+	uint8_t length; /* Value portion only, in byte */
 };
 
 #define MAX_SUBTLV_SIZE 256
@@ -102,7 +102,7 @@ struct subtlv_header {
 #define TE_SUBTLV_ADMIN_GRP	3
 struct te_subtlv_admin_grp {
 	struct subtlv_header header; /* Value length is 4 octets. */
-	u_int32_t value;	     /* Admin. group membership. */
+	uint32_t value;		     /* Admin. group membership. */
 } __attribute__((__packed__));
 
 /* Link Local/Remote Identifiers - RFC 5307 */
@@ -110,8 +110,8 @@ struct te_subtlv_admin_grp {
 #define TE_SUBTLV_LLRI_SIZE	8
 struct te_subtlv_llri {
 	struct subtlv_header header; /* Value length is 8 octets. */
-	u_int32_t local;	     /* Link Local Identifier */
-	u_int32_t remote;	    /* Link Remote Identifier */
+	uint32_t local;		     /* Link Local Identifier */
+	uint32_t remote;	     /* Link Remote Identifier */
 } __attribute__((__packed__));
 
 /* Link Sub-TLV: Local Interface IP Address - RFC 5305 */
@@ -155,14 +155,14 @@ struct te_subtlv_unrsv_bw {
 #define TE_SUBTLV_TE_METRIC_SIZE    3
 struct te_subtlv_te_metric {
 	struct subtlv_header header; /* Value length is 4 octets. */
-	u_char value[3];	     /* Link metric for TE purpose. */
+	uint8_t value[3];	    /* Link metric for TE purpose. */
 } __attribute__((__packed__));
 
 /* Remote AS Number sub-TLV - RFC5316 */
 #define TE_SUBTLV_RAS		24
 struct te_subtlv_ras {
 	struct subtlv_header header; /* Value length is 4 octets. */
-	u_int32_t value;	     /* Remote AS number */
+	uint32_t value;		     /* Remote AS number */
 } __attribute__((__packed__));
 
 /* IPv4 Remote ASBR ID Sub-TLV - RFC5316 */
@@ -178,7 +178,7 @@ struct te_subtlv_rip {
 #define TE_SUBTLV_AV_DELAY	33
 struct te_subtlv_av_delay {
 	struct subtlv_header header; /* Value length is 4 bytes. */
-	u_int32_t value; /* Average delay in micro-seconds only 24 bits => 0 ...
+	uint32_t value; /* Average delay in micro-seconds only 24 bits => 0 ...
 			    16777215
 			    with Anomalous Bit (A) as Upper most bit */
 } __attribute__((__packed__));
@@ -188,10 +188,10 @@ struct te_subtlv_av_delay {
 #define TE_SUBTLV_MM_DELAY_SIZE    8
 struct te_subtlv_mm_delay {
 	struct subtlv_header header; /* Value length is 8 bytes. */
-	u_int32_t low;  /* low delay in micro-seconds only 24 bits => 0 ...
+	uint32_t low;  /* low delay in micro-seconds only 24 bits => 0 ...
 			   16777215
 			   with Anomalous Bit (A) as Upper most bit */
-	u_int32_t high; /* high delay in micro-seconds only 24 bits => 0 ...
+	uint32_t high; /* high delay in micro-seconds only 24 bits => 0 ...
 			   16777215 */
 } __attribute__((__packed__));
 
@@ -199,7 +199,7 @@ struct te_subtlv_mm_delay {
 #define TE_SUBTLV_DELAY_VAR     35
 struct te_subtlv_delay_var {
 	struct subtlv_header header; /* Value length is 4 bytes. */
-	u_int32_t value; /* interval in micro-seconds only 24 bits => 0 ...
+	uint32_t value; /* interval in micro-seconds only 24 bits => 0 ...
 			    16777215 */
 } __attribute__((__packed__));
 
@@ -207,7 +207,7 @@ struct te_subtlv_delay_var {
 #define TE_SUBTLV_PKT_LOSS	36
 struct te_subtlv_pkt_loss {
 	struct subtlv_header header; /* Value length is 4 bytes. */
-	u_int32_t
+	uint32_t
 		value; /* in percentage of total traffic only 24 bits (2^24 - 2)
 			  with Anomalous Bit (A) as Upper most bit */
 } __attribute__((__packed__));
@@ -244,30 +244,25 @@ typedef enum _status_t { disable, enable, learn } status_t;
 /* Mode for Inter-AS LSP */ /* TODO: Check how if LSP is flooded in RFC5316 */
 typedef enum _interas_mode_t { off, region, as, emulate } interas_mode_t;
 
-#define IS_MPLS_TE(m)    (m.status == enable)
-#define IS_CIRCUIT_TE(c) (c->status == enable)
+#define IS_MPLS_TE(m)    (m && m->status == enable)
 
-/* Following structure are internal use only. */
-struct isis_mpls_te {
+/* Per area MPLS-TE parameters */
+struct mpls_te_area {
 	/* Status of MPLS-TE: enable or disable */
 	status_t status;
 
 	/* L1, L1-L2, L2-Only */
-	u_int8_t level;
+	uint8_t level;
 
 	/* RFC5316 */
 	interas_mode_t inter_as;
 	struct in_addr interas_areaid;
 
-	/* Circuit list on which TE are enable */
-	struct list *cir_list;
-
 	/* MPLS_TE router ID */
 	struct in_addr router_id;
 };
 
-extern struct isis_mpls_te isisMplsTE;
-
+/* Per Circuit MPLS-TE parameters */
 struct mpls_te_circuit {
 
 	/* Status of MPLS-TE on this interface */
@@ -275,10 +270,10 @@ struct mpls_te_circuit {
 
 	/* Type of MPLS-TE circuit: STD_TE(RFC5305), INTER_AS(RFC5316),
 	 * INTER_AS_EMU(RFC5316 emulated) */
-	u_int8_t type;
+	uint8_t type;
 
 	/* Total size of sub_tlvs */
-	u_char length;
+	uint8_t length;
 
 	/* Store subTLV in network byte order. */
 	/* RFC5305 */
@@ -309,7 +304,8 @@ struct mpls_te_circuit {
 void isis_mpls_te_init(void);
 struct mpls_te_circuit *mpls_te_circuit_new(void);
 struct sbuf;
-void mpls_te_print_detail(struct sbuf *buf, int indent, uint8_t *subtlvs, uint8_t subtlv_len);
+void mpls_te_print_detail(struct sbuf *buf, int indent, uint8_t *subtlvs,
+			  uint8_t subtlv_len);
 void set_circuitparams_local_ipaddr(struct mpls_te_circuit *, struct in_addr);
 void set_circuitparams_rmt_ipaddr(struct mpls_te_circuit *, struct in_addr);
 uint8_t subtlvs_len(struct mpls_te_circuit *);
@@ -317,6 +313,5 @@ uint8_t add_te_subtlvs(uint8_t *, struct mpls_te_circuit *);
 uint8_t build_te_subtlvs(uint8_t *, struct isis_circuit *);
 void isis_link_params_update(struct isis_circuit *, struct interface *);
 void isis_mpls_te_update(struct interface *);
-void isis_mpls_te_config_write_router(struct vty *);
 
 #endif /* _ZEBRA_ISIS_MPLS_TE_H */

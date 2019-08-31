@@ -28,15 +28,15 @@
  * is the *last* keyword on the line no matter
  * what.
  */
-int use_json(const int argc, struct cmd_token *argv[])
+bool use_json(const int argc, struct cmd_token *argv[])
 {
 	if (argc == 0)
-		return 0;
+		return false;
 
 	if (argv[argc - 1]->arg && strmatch(argv[argc - 1]->text, "json"))
-		return 1;
+		return true;
 
-	return 0;
+	return false;
 }
 
 void json_object_string_add(struct json_object *obj, const char *key,
@@ -62,6 +62,11 @@ void json_object_boolean_false_add(struct json_object *obj, const char *key)
 void json_object_boolean_true_add(struct json_object *obj, const char *key)
 {
 	json_object_object_add(obj, key, json_object_new_boolean(1));
+}
+
+void json_object_boolean_add(struct json_object *obj, const char *key, bool val)
+{
+	json_object_object_add(obj, key, json_object_new_boolean(val));
 }
 
 struct json_object *json_object_lock(struct json_object *obj)

@@ -24,6 +24,11 @@
 #define _ZEBRA_BFD_H
 
 #include "lib/json.h"
+#include "lib/zclient.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #define BFD_DEF_MIN_RX 300
 #define BFD_MIN_MIN_RX 50
@@ -37,12 +42,14 @@
 
 #define BFD_GBL_FLAG_IN_SHUTDOWN (1 << 0) /* The daemon in shutdown */
 struct bfd_gbl {
-	u_int16_t flags;
+	uint16_t flags;
 };
 
 #define BFD_FLAG_PARAM_CFG (1 << 0) /* parameters have been configured */
 #define BFD_FLAG_BFD_REG   (1 << 1) /* Peer registered with BFD */
 #define BFD_FLAG_BFD_TYPE_MULTIHOP (1 << 2) /* Peer registered with BFD as multihop */
+#define BFD_FLAG_BFD_CBIT_ON (1 << 3) /* Peer registered with CBIT set to on */
+#define BFD_FLAG_BFD_CHECK_CONTROLPLANE (1 << 4) /* BFD and controlplane daemon are linked */
 
 #define BFD_STATUS_UNKNOWN (1 << 0) /* BFD session status never received */
 #define BFD_STATUS_DOWN    (1 << 1) /* BFD session status is down */
@@ -55,12 +62,12 @@ enum bfd_sess_type {
 };
 
 struct bfd_info {
-	u_int16_t flags;
-	u_int8_t detect_mult;
-	u_int32_t desired_min_tx;
-	u_int32_t required_min_rx;
+	uint16_t flags;
+	uint8_t detect_mult;
+	uint32_t desired_min_tx;
+	uint32_t required_min_rx;
 	time_t last_update;
-	u_int8_t status;
+	uint8_t status;
 	enum bfd_sess_type type;
 };
 
@@ -70,37 +77,43 @@ extern void bfd_info_free(struct bfd_info **bfd_info);
 
 extern int bfd_validate_param(struct vty *vty, const char *dm_str,
 			      const char *rx_str, const char *tx_str,
-			      u_int8_t *dm_val, u_int32_t *rx_val,
-			      u_int32_t *tx_val);
+			      uint8_t *dm_val, uint32_t *rx_val,
+			      uint32_t *tx_val);
 
-extern void bfd_set_param(struct bfd_info **bfd_info, u_int32_t min_rx,
-			  u_int32_t min_tx, u_int8_t detect_mult, int defaults,
+extern void bfd_set_param(struct bfd_info **bfd_info, uint32_t min_rx,
+			  uint32_t min_tx, uint8_t detect_mult, int defaults,
 			  int *command);
 extern void bfd_peer_sendmsg(struct zclient *zclient, struct bfd_info *bfd_info,
 			     int family, void *dst_ip, void *src_ip,
-			     char *if_name, int ttl, int multihop, int command,
-			     int set_flag, vrf_id_t vrf_id);
+			     char *if_name, int ttl, int multihop, int cbit,
+			     int command, int set_flag, vrf_id_t vrf_id);
 
 extern const char *bfd_get_command_dbg_str(int command);
 
 extern struct interface *bfd_get_peer_info(struct stream *s, struct prefix *dp,
 					   struct prefix *sp, int *status,
+					   int *remote_cbit,
 					   vrf_id_t vrf_id);
 
 const char *bfd_get_status_str(int status);
 
 extern void bfd_show_param(struct vty *vty, struct bfd_info *bfd_info,
-			   int bfd_tag, int extra_space, u_char use_json,
+			   int bfd_tag, int extra_space, bool use_json,
 			   json_object *json_obj);
 
 extern void bfd_show_info(struct vty *vty, struct bfd_info *bfd_info,
-			  int multihop, int extra_space, u_char use_json,
+			  int multihop, int extra_space, bool use_json,
 			  json_object *json_obj);
 
-extern void bfd_client_sendmsg(struct zclient *zclient, int command);
+extern void bfd_client_sendmsg(struct zclient *zclient, int command,
+			       vrf_id_t vrf_id);
 
 extern void bfd_gbl_init(void);
 
 extern void bfd_gbl_exit(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ZEBRA_BFD_H */

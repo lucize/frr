@@ -139,6 +139,16 @@ ldpe(void)
 void
 ldpe_init(struct ldpd_init *init)
 {
+#ifdef __OpenBSD__
+	/* This socket must be open before dropping privileges. */
+	global.pfkeysock = pfkey_init();
+	if (sysdep.no_pfkey == 0) {
+		pfkey_ev = NULL;
+		thread_add_read(master, ldpe_dispatch_pfkey, NULL, global.pfkeysock,
+				&pfkey_ev);
+	}
+#endif
+
 	/* drop privileges */
 	ldpe_privs.user = init->user;
 	ldpe_privs.group = init->group;
@@ -159,14 +169,6 @@ ldpe_init(struct ldpd_init *init)
 		fatal("inet_pton");
 	if (inet_pton(AF_INET6, AllRouters_v6, &global.mcast_addr_v6) != 1)
 		fatal("inet_pton");
-#ifdef __OpenBSD__
-	global.pfkeysock = pfkey_init();
-	if (sysdep.no_pfkey == 0) {
-		pfkey_ev = NULL;
-		thread_add_read(master, ldpe_dispatch_pfkey, NULL, global.pfkeysock,
-				&pfkey_ev);
-	}
-#endif
 
 	/* mark sockets as closed */
 	global.ipv4.ldp_disc_socket = -1;
@@ -219,8 +221,11 @@ ldpe_shutdown(void)
 		assert(if_addr != LIST_FIRST(&global.addr_list));
 		free(if_addr);
 	}
-	while ((adj = RB_ROOT(global_adj_head, &global.adj_tree)) != NULL)
+	while (!RB_EMPTY(global_adj_head, &global.adj_tree)) {
+		adj = RB_ROOT(global_adj_head, &global.adj_tree);
+
 		adj_del(adj, S_SHUTDOWN);
+	}
 
 	/* clean up */
 	if (iev_lde)

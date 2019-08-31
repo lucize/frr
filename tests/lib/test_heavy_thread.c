@@ -1,6 +1,4 @@
 /*
- * $Id: heavy-thread.c,v 1.2 2005/04/25 16:42:24 paul Exp $
- *
  * This file is part of Quagga.
  *
  * Quagga is free software; you can redistribute it and/or modify it
@@ -112,16 +110,9 @@ DEFUN (clear_foo,
 
 	str = argv_concat(argv, argc, 0);
 
-	if ((ws = XMALLOC(MTYPE_TMP, sizeof(*ws))) == NULL) {
-		zlog_err("%s: unable to allocate work_state", __func__);
-		return CMD_WARNING;
-	}
+	ws = XMALLOC(MTYPE_TMP, sizeof(*ws));
 
-	if (!(ws->str = XSTRDUP(MTYPE_TMP, str))) {
-		zlog_err("%s: unable to xstrdup", __func__);
-		XFREE(MTYPE_TMP, ws);
-		return CMD_WARNING;
-	}
+	ws->str = XSTRDUP(MTYPE_TMP, str);
 
 	ws->vty = vty;
 	ws->i = ITERS_FIRST;
@@ -131,7 +122,7 @@ DEFUN (clear_foo,
 	return CMD_SUCCESS;
 }
 
-void test_init()
+void test_init(void)
 {
 	install_element(VIEW_NODE, &clear_foo_cmd);
 }

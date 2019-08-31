@@ -23,14 +23,13 @@
 
 #include <zebra.h>
 
+#include "printfrr.h"
 #include "stream.h"
 #include "vty.h"
 #include "hash.h"
 #include "if.h"
 #include "command.h"
-#include "log_int.h"
 
-#include "isisd/dict.h"
 #include "isisd/isis_constants.h"
 #include "isisd/isis_common.h"
 #include "isisd/isis_flags.h"
@@ -56,7 +55,7 @@ char nlpidstring[30];
 /*
  * This converts the isonet to its printable format
  */
-const char *isonet_print(const u_char *from, int len)
+const char *isonet_print(const uint8_t *from, int len)
 {
 	int i = 0;
 	char *pos = isonet;
@@ -87,11 +86,11 @@ const char *isonet_print(const u_char *from, int len)
  * Returns 0 on error, length of buff on ok
  * extract dot from the dotted str, and insert all the number in a buff
  */
-int dotformat2buff(u_char *buff, const char *dotted)
+int dotformat2buff(uint8_t *buff, const char *dotted)
 {
 	int dotlen, len = 0;
 	const char *pos = dotted;
-	u_char number[3];
+	uint8_t number[3];
 	int nextdotpos = 2;
 
 	number[2] = '\0';
@@ -118,7 +117,8 @@ int dotformat2buff(u_char *buff, const char *dotted)
 			break;
 		}
 
-		if ((isxdigit((int)*pos)) && (isxdigit((int)*(pos + 1)))) {
+		if ((isxdigit((unsigned char)*pos)) &&
+		    (isxdigit((unsigned char)*(pos + 1)))) {
 			memcpy(number, pos, 2);
 			pos += 2;
 		} else {
@@ -136,11 +136,11 @@ int dotformat2buff(u_char *buff, const char *dotted)
 /*
  * conversion of XXXX.XXXX.XXXX to memory
  */
-int sysid2buff(u_char *buff, const char *dotted)
+int sysid2buff(uint8_t *buff, const char *dotted)
 {
 	int len = 0;
 	const char *pos = dotted;
-	u_char number[3];
+	uint8_t number[3];
 
 	number[2] = '\0';
 	// surely not a sysid_string if not 14 length
@@ -158,7 +158,8 @@ int sysid2buff(u_char *buff, const char *dotted)
 			pos++;
 			continue;
 		}
-		if ((isxdigit((int)*pos)) && (isxdigit((int)*(pos + 1)))) {
+		if ((isxdigit((unsigned char)*pos)) &&
+		    (isxdigit((unsigned char)*(pos + 1)))) {
 			memcpy(number, pos, 2);
 			pos += 2;
 		} else {
@@ -304,17 +305,17 @@ const char *syst2string(int type)
 /*
  * Print functions - we print to static vars
  */
-const char *snpa_print(const u_char *from)
+const char *snpa_print(const uint8_t *from)
 {
 	return isis_format_id(from, ISIS_SYS_ID_LEN);
 }
 
-const char *sysid_print(const u_char *from)
+const char *sysid_print(const uint8_t *from)
 {
 	return isis_format_id(from, ISIS_SYS_ID_LEN);
 }
 
-const char *rawlspid_print(const u_char *from)
+const char *rawlspid_print(const uint8_t *from)
 {
 	return isis_format_id(from, 8);
 }
@@ -355,10 +356,10 @@ const char *isis_format_id(const uint8_t *id, size_t len)
 	return rv;
 }
 
-const char *time2string(u_int32_t time)
+const char *time2string(uint32_t time)
 {
 	char *pos = datestring;
-	u_int32_t rest;
+	uint32_t rest;
 
 	if (time == 0)
 		return "-";
@@ -421,7 +422,7 @@ unsigned long isis_jitter(unsigned long timer, unsigned long jitter)
 	return timer;
 }
 
-struct in_addr newprefix2inaddr(u_char *prefix_start, u_char prefix_masklen)
+struct in_addr newprefix2inaddr(uint8_t *prefix_start, uint8_t prefix_masklen)
 {
 	memset(&new_prefix, 0, sizeof(new_prefix));
 	memcpy(&new_prefix, prefix_start,
@@ -435,7 +436,7 @@ struct in_addr newprefix2inaddr(u_char *prefix_start, u_char prefix_masklen)
  * Returns the dynamic hostname associated with the passed system ID.
  * If no dynamic hostname found then returns formatted system ID.
  */
-const char *print_sys_hostname(const u_char *sysid)
+const char *print_sys_hostname(const uint8_t *sysid)
 {
 	struct isis_dynhn *dyn;
 
@@ -513,42 +514,14 @@ void zlog_dump_data(void *data, int len)
 	return;
 }
 
-static char *qasprintf(const char *format, va_list ap)
-{
-	va_list aq;
-	va_copy(aq, ap);
-
-	int size = 0;
-	char *p = NULL;
-
-	size = vsnprintf(p, size, format, ap);
-
-	if (size < 0) {
-		va_end(aq);
-		return NULL;
-	}
-
-	size++;
-	p = XMALLOC(MTYPE_TMP, size);
-
-	size = vsnprintf(p, size, format, aq);
-	va_end(aq);
-
-	if (size < 0) {
-		XFREE(MTYPE_TMP, p);
-		return NULL;
-	}
-
-	return p;
-}
-
 void log_multiline(int priority, const char *prefix, const char *format, ...)
 {
+	char shortbuf[256];
 	va_list ap;
 	char *p;
 
 	va_start(ap, format);
-	p = qasprintf(format, ap);
+	p = vasnprintfrr(MTYPE_TMP, shortbuf, sizeof(shortbuf), format, ap);
 	va_end(ap);
 
 	if (!p)
@@ -560,16 +533,18 @@ void log_multiline(int priority, const char *prefix, const char *format, ...)
 		zlog(priority, "%s%s", prefix, line);
 	}
 
-	XFREE(MTYPE_TMP, p);
+	if (p != shortbuf)
+		XFREE(MTYPE_TMP, p);
 }
 
 void vty_multiline(struct vty *vty, const char *prefix, const char *format, ...)
 {
+	char shortbuf[256];
 	va_list ap;
 	char *p;
 
 	va_start(ap, format);
-	p = qasprintf(format, ap);
+	p = vasnprintfrr(MTYPE_TMP, shortbuf, sizeof(shortbuf), format, ap);
 	va_end(ap);
 
 	if (!p)
@@ -581,7 +556,8 @@ void vty_multiline(struct vty *vty, const char *prefix, const char *format, ...)
 		vty_out(vty, "%s%s\n", prefix, line);
 	}
 
-	XFREE(MTYPE_TMP, p);
+	if (p != shortbuf)
+		XFREE(MTYPE_TMP, p);
 }
 
 void vty_out_timestr(struct vty *vty, time_t uptime)

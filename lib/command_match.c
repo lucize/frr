@@ -28,8 +28,6 @@
 
 DEFINE_MTYPE_STATIC(LIB, CMD_MATCHSTACK, "Command Match Stack")
 
-#define MAXDEPTH 256
-
 #ifdef TRACE_MATCHER
 #define TM 1
 #else
@@ -84,7 +82,7 @@ static enum match_type match_mac(const char *, bool);
 enum matcher_rv command_match(struct graph *cmdgraph, vector vline,
 			      struct list **argv, const struct cmd_element **el)
 {
-	struct graph_node *stack[MAXDEPTH];
+	struct graph_node *stack[CMD_ARGC_MAX];
 	enum matcher_rv status;
 	*argv = NULL;
 
@@ -100,6 +98,9 @@ enum matcher_rv command_match(struct graph *cmdgraph, vector vline,
 	if (status == MATCHER_OK) { // successful match
 		struct listnode *head = listhead(*argv);
 		struct listnode *tail = listtail(*argv);
+
+		assert(head);
+		assert(tail);
 
 		// delete dummy start node
 		cmd_token_del((struct cmd_token *)head->data);
@@ -194,13 +195,13 @@ static enum matcher_rv command_match_r(struct graph_node *start, vector vline,
 	enum matcher_rv status = MATCHER_NO_MATCH;
 
 	// get the minimum match level that can count as a full match
-	struct cmd_token *token = start->data;
+	struct cmd_token *copy, *token = start->data;
 	enum match_type minmatch = min_match_level(token->type);
 
 	/* check history/stack of tokens
 	 * this disallows matching the same one more than once if there is a
 	 * circle in the graph (used for keyword arguments) */
-	if (n == MAXDEPTH)
+	if (n == CMD_ARGC_MAX)
 		return MATCHER_NO_MATCH;
 	if (!token->allowrepeat)
 		for (size_t s = 0; s < n; s++)
@@ -325,15 +326,15 @@ static enum matcher_rv command_match_r(struct graph_node *start, vector vline,
 	}
 	if (*currbest) {
 		// copy token, set arg and prepend to currbest
-		struct cmd_token *token = start->data;
-		struct cmd_token *copy = cmd_token_dup(token);
+		token = start->data;
+		copy = cmd_token_dup(token);
 		copy->arg = XSTRDUP(MTYPE_CMD_ARG, input_token);
 		listnode_add_before(*currbest, (*currbest)->head, copy);
 	} else if (n + 1 == vector_active(vline) && status == MATCHER_NO_MATCH)
 		status = MATCHER_INCOMPLETE;
 
 	// cleanup
-	list_delete_and_null(&next);
+	list_delete(&next);
 
 	return status;
 }
@@ -366,7 +367,7 @@ enum matcher_rv command_complete(struct graph *graph, vector vline,
 
 	unsigned int idx;
 	for (idx = 0; idx < vector_active(vline) && next->count > 0; idx++) {
-		list_delete_and_null(&current);
+		list_delete(&current);
 		current = next;
 		next = list_new();
 		next->del = stack_del;
@@ -457,8 +458,8 @@ enum matcher_rv command_complete(struct graph *graph, vector vline,
 		}
 	}
 
-	list_delete_and_null(&current);
-	list_delete_and_null(&next);
+	list_delete(&current);
+	list_delete(&next);
 
 	return mrv;
 }
@@ -607,11 +608,14 @@ static struct cmd_token *disambiguate_tokens(struct cmd_token *first,
 static struct list *disambiguate(struct list *first, struct list *second,
 				 vector vline, unsigned int n)
 {
+	assert(first != NULL);
+	assert(second != NULL);
 	// doesn't make sense for these to be inequal length
 	assert(first->count == second->count);
 	assert(first->count == vector_active(vline) - n + 1);
 
-	struct listnode *fnode = listhead(first), *snode = listhead(second);
+	struct listnode *fnode = listhead_unchecked(first),
+			*snode = listhead_unchecked(second);
 	struct cmd_token *ftok = listgetdata(fnode), *stok = listgetdata(snode),
 			 *best = NULL;
 
@@ -648,7 +652,7 @@ static void del_arglist(struct list *list)
 	list_delete_node(list, tail);
 
 	// delete the rest of the list as usual
-	list_delete_and_null(&list);
+	list_delete(&list);
 }
 
 /*---------- token level matching functions ----------*/
@@ -710,7 +714,7 @@ static enum match_type match_ipv4(const char *str)
 				dots++;
 				break;
 			}
-			if (!isdigit((int)*str))
+			if (!isdigit((unsigned char)*str))
 				return no_match;
 
 			str++;
@@ -719,7 +723,7 @@ static enum match_type match_ipv4(const char *str)
 		if (str - sp > 3)
 			return no_match;
 
-		strncpy(buf, sp, str - sp);
+		memcpy(buf, sp, str - sp);
 		if (atoi(buf) > 255)
 			return no_match;
 
@@ -761,7 +765,7 @@ static enum match_type match_ipv4_prefix(const char *str)
 				break;
 			}
 
-			if (!isdigit((int)*str))
+			if (!isdigit((unsigned char)*str))
 				return no_match;
 
 			str++;
@@ -770,7 +774,7 @@ static enum match_type match_ipv4_prefix(const char *str)
 		if (str - sp > 3)
 			return no_match;
 
-		strncpy(buf, sp, str - sp);
+		memcpy(buf, sp, str - sp);
 		if (atoi(buf) > 255)
 			return no_match;
 
@@ -793,7 +797,7 @@ static enum match_type match_ipv4_prefix(const char *str)
 
 	sp = str;
 	while (*str != '\0') {
-		if (!isdigit((int)*str))
+		if (!isdigit((unsigned char)*str))
 			return no_match;
 
 		str++;

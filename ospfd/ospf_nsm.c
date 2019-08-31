@@ -48,6 +48,7 @@
 #include "ospfd/ospf_flood.h"
 #include "ospfd/ospf_abr.h"
 #include "ospfd/ospf_bfd.h"
+#include "ospfd/ospf_errors.h"
 
 DEFINE_HOOK(ospf_nsm_change,
 	    (struct ospf_neighbor * on, int state, int oldstate),
@@ -93,7 +94,7 @@ static int ospf_db_desc_timer(struct thread *thread)
 	return 0;
 }
 
-/* Hook function called after ospf NSM event is occured.
+/* Hook function called after ospf NSM event is occurred.
  *
  * Set/clear any timers whose condition is implicit to the neighbour
  * state. There may be other timers which are set/unset according to other
@@ -279,38 +280,38 @@ static int nsm_negotiation_done(struct ospf_neighbor *nbr)
 	/* Send proactive ARP requests */
 	ospf_proactively_arp(nbr);
 
-	LSDB_LOOP(ROUTER_LSDB(area), rn, lsa)
-	ospf_db_summary_add(nbr, lsa);
-	LSDB_LOOP(NETWORK_LSDB(area), rn, lsa)
-	ospf_db_summary_add(nbr, lsa);
-	LSDB_LOOP(SUMMARY_LSDB(area), rn, lsa)
-	ospf_db_summary_add(nbr, lsa);
-	LSDB_LOOP(ASBR_SUMMARY_LSDB(area), rn, lsa)
-	ospf_db_summary_add(nbr, lsa);
+	LSDB_LOOP (ROUTER_LSDB(area), rn, lsa)
+		ospf_db_summary_add(nbr, lsa);
+	LSDB_LOOP (NETWORK_LSDB(area), rn, lsa)
+		ospf_db_summary_add(nbr, lsa);
+	LSDB_LOOP (SUMMARY_LSDB(area), rn, lsa)
+		ospf_db_summary_add(nbr, lsa);
+	LSDB_LOOP (ASBR_SUMMARY_LSDB(area), rn, lsa)
+		ospf_db_summary_add(nbr, lsa);
 
 	/* Process only if the neighbor is opaque capable. */
 	if (CHECK_FLAG(nbr->options, OSPF_OPTION_O)) {
-		LSDB_LOOP(OPAQUE_LINK_LSDB(area), rn, lsa)
-		ospf_db_summary_add(nbr, lsa);
-		LSDB_LOOP(OPAQUE_AREA_LSDB(area), rn, lsa)
-		ospf_db_summary_add(nbr, lsa);
+		LSDB_LOOP (OPAQUE_LINK_LSDB(area), rn, lsa)
+			ospf_db_summary_add(nbr, lsa);
+		LSDB_LOOP (OPAQUE_AREA_LSDB(area), rn, lsa)
+			ospf_db_summary_add(nbr, lsa);
 	}
 
 	if (CHECK_FLAG(nbr->options, OSPF_OPTION_NP)) {
-		LSDB_LOOP(NSSA_LSDB(area), rn, lsa)
-		ospf_db_summary_add(nbr, lsa);
+		LSDB_LOOP (NSSA_LSDB(area), rn, lsa)
+			ospf_db_summary_add(nbr, lsa);
 	}
 
 	if (nbr->oi->type != OSPF_IFTYPE_VIRTUALLINK
 	    && area->external_routing == OSPF_AREA_DEFAULT)
-		LSDB_LOOP(EXTERNAL_LSDB(nbr->oi->ospf), rn, lsa)
-	ospf_db_summary_add(nbr, lsa);
+		LSDB_LOOP (EXTERNAL_LSDB(nbr->oi->ospf), rn, lsa)
+			ospf_db_summary_add(nbr, lsa);
 
 	if (CHECK_FLAG(nbr->options, OSPF_OPTION_O)
 	    && (nbr->oi->type != OSPF_IFTYPE_VIRTUALLINK
 		&& area->external_routing == OSPF_AREA_DEFAULT))
-		LSDB_LOOP(OPAQUE_AS_LSDB(nbr->oi->ospf), rn, lsa)
-	ospf_db_summary_add(nbr, lsa);
+		LSDB_LOOP (OPAQUE_AS_LSDB(nbr->oi->ospf), rn, lsa)
+			ospf_db_summary_add(nbr, lsa);
 
 	return 0;
 }
@@ -614,9 +615,7 @@ static void nsm_change_state(struct ospf_neighbor *nbr, int state)
 {
 	struct ospf_interface *oi = nbr->oi;
 	struct ospf_area *vl_area = NULL;
-	u_char old_state;
-	int x;
-	int force = 1;
+	uint8_t old_state;
 
 	/* Preserve old status. */
 	old_state = nbr->state;
@@ -663,32 +662,6 @@ static void nsm_change_state(struct ospf_neighbor *nbr, int state)
 			if (oi->type == OSPF_IFTYPE_VIRTUALLINK && vl_area)
 				if (++vl_area->full_vls == 1)
 					ospf_schedule_abr_task(oi->ospf);
-
-			/* kevinm: refresh any redistributions */
-			for (x = ZEBRA_ROUTE_SYSTEM; x < ZEBRA_ROUTE_MAX; x++) {
-				struct list *red_list;
-				struct listnode *node;
-				struct ospf_redist *red;
-
-				if (x == ZEBRA_ROUTE_OSPF6)
-					continue;
-
-				red_list = oi->ospf->redist[x];
-				if (!red_list)
-					continue;
-
-				for (ALL_LIST_ELEMENTS_RO(red_list, node, red))
-					ospf_external_lsa_refresh_type(
-						oi->ospf, x, red->instance,
-						force);
-			}
-			/* XXX: Clearly some thing is wrong with refresh of
-			 * external LSAs
-			 * this added to hack around defaults not refreshing
-			 * after a timer
-			 * jump.
-			 */
-			ospf_external_lsa_refresh_default(oi->ospf);
 		} else {
 			oi->full_nbrs--;
 			oi->area->full_nbrs--;
@@ -702,17 +675,18 @@ static void nsm_change_state(struct ospf_neighbor *nbr, int state)
 							oi->ospf);
 		}
 
-		zlog_info(
-			"nsm_change_state(%s, %s -> %s): "
-			"scheduling new router-LSA origination",
-			inet_ntoa(nbr->router_id),
-			lookup_msg(ospf_nsm_state_msg, old_state, NULL),
-			lookup_msg(ospf_nsm_state_msg, state, NULL));
+		if (CHECK_FLAG(oi->ospf->config, OSPF_LOG_ADJACENCY_DETAIL))
+			zlog_info(
+				"%s:(%s, %s -> %s): "
+				"scheduling new router-LSA origination",
+				__PRETTY_FUNCTION__, inet_ntoa(nbr->router_id),
+				lookup_msg(ospf_nsm_state_msg, old_state, NULL),
+				lookup_msg(ospf_nsm_state_msg, state, NULL));
 
 		ospf_router_lsa_update_area(oi->area);
 
 		if (oi->type == OSPF_IFTYPE_VIRTUALLINK) {
-			struct ospf_area *vl_area = ospf_area_lookup_by_area_id(
+			vl_area = ospf_area_lookup_by_area_id(
 				oi->ospf, oi->vl_data->vl_area_id);
 
 			if (vl_area)
@@ -794,7 +768,8 @@ int ospf_nsm_event(struct thread *thread)
 			 * not
 			 * try set next_state.
 			 */
-			zlog_warn(
+			flog_err(
+				EC_OSPF_FSM_INVALID_STATE,
 				"NSM[%s:%s]: %s (%s): "
 				"Warning: action tried to change next_state to %s",
 				IF_NAME(nbr->oi), inet_ntoa(nbr->router_id),

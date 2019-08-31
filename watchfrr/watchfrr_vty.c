@@ -40,9 +40,22 @@ DEFUN(config_write_integrated,
 	pid_t child;
 	sigset_t oldmask, sigmask;
 
+	const char *e_inprog = "Configuration write already in progress.";
+	const char *e_dmn = "Not all daemons are up, cannot write config.";
+
 	if (integrated_write_pid != -1) {
-		vty_out(vty, "%% configuration write already in progress.\n");
+		vty_out(vty, "%% %s\n", e_inprog);
 		return CMD_WARNING;
+	}
+
+	/* check that all daemons are up before clobbering config */
+	if (!check_all_up()) {
+		vty_out(vty, "%% %s\n", e_dmn);
+		/*
+		 * vtysh interprets this return value to mean that it should
+		 * not try to write the config itself
+		 */
+		return CMD_WARNING_CONFIG_FAILED;
 	}
 
 	fflush(stdout);
@@ -111,6 +124,16 @@ DEFUN_NOSH (show_debugging_watchfrr,
 	return CMD_SUCCESS;
 }
 
+DEFUN (show_watchfrr,
+       show_watchfrr_cmd,
+       "show watchfrr",
+       SHOW_STR
+       WATCHFRR_STR)
+{
+	watchfrr_status(vty);
+	return CMD_SUCCESS;
+}
+
 void integrated_write_sigchld(int status)
 {
 	uint8_t reply[4] = {0, 0, 0, CMD_WARNING};
@@ -146,4 +169,5 @@ void watchfrr_vty_init(void)
 	install_element(ENABLE_NODE, &config_write_integrated_cmd);
 	install_element(ENABLE_NODE, &show_debugging_watchfrr_cmd);
 	install_element(CONFIG_NODE, &show_debugging_watchfrr_cmd);
+	install_element(VIEW_NODE, &show_watchfrr_cmd);
 }

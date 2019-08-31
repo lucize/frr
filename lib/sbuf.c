@@ -22,6 +22,7 @@
  */
 #include <zebra.h>
 
+#include "printfrr.h"
 #include "sbuf.h"
 #include "memory.h"
 
@@ -63,13 +64,12 @@ void sbuf_push(struct sbuf *buf, int indent, const char *format, ...)
 	int written;
 
 	if (!buf->fixed) {
-		char dummy;
 		int written1, written2;
 		size_t new_size;
 
-		written1 = snprintf(&dummy, 0, "%*s", indent, "");
+		written1 = indent;
 		va_start(args, format);
-		written2 = vsnprintf(&dummy, 0, format, args);
+		written2 = vsnprintfrr(NULL, 0, format, args);
 		va_end(args);
 
 		new_size = buf->size;
@@ -93,8 +93,8 @@ void sbuf_push(struct sbuf *buf, int indent, const char *format, ...)
 		buf->pos = buf->size;
 
 	va_start(args, format);
-	written = vsnprintf(buf->buf + buf->pos, buf->size - buf->pos, format,
-			    args);
+	written = vsnprintfrr(buf->buf + buf->pos, buf->size - buf->pos,
+			      format, args);
 	va_end(args);
 
 	if (written >= 0)

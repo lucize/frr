@@ -34,6 +34,7 @@
 #include "qpb/linear_allocator.h"
 #include "fpm/fpm_pb.h"
 
+#include "zebra_router.h"
 #include "zebra_fpm_private.h"
 
 /*
@@ -129,6 +130,7 @@ static inline int add_nexthop(qpb_allocator_t *allocator, Fpm__AddRoute *msg,
 	}
 
 	// TODO: Use src.
+	(void)src;
 
 	return 1;
 }
@@ -163,6 +165,7 @@ static Fpm__AddRoute *create_add_route_message(qpb_allocator_t *allocator,
 	msg->sub_address_family = QPB__SUB_ADDRESS_FAMILY__UNICAST;
 	msg->key = fpm_route_key_create(allocator, rib_dest_prefix(dest));
 	qpb_protocol_set(&msg->protocol, re->type);
+	msg->has_route_type = 1;
 	msg->route_type = FPM__ROUTE_TYPE__NORMAL;
 	msg->metric = re->metric;
 
@@ -170,11 +173,11 @@ static Fpm__AddRoute *create_add_route_message(qpb_allocator_t *allocator,
 	 * Figure out the set of nexthops to be added to the message.
 	 */
 	num_nhs = 0;
-	for (ALL_NEXTHOPS(re->nexthop, nexthop)) {
-		if (num_nhs >= multipath_num)
+	for (ALL_NEXTHOPS(re->ng, nexthop)) {
+		if (num_nhs >= zrouter.multipath_num)
 			break;
 
-		if (num_nhs >= ZEBRA_NUM_OF(nexthops))
+		if (num_nhs >= array_size(nexthops))
 			break;
 
 		if (nexthop->type == NEXTHOP_TYPE_BLACKHOLE) {
@@ -245,6 +248,7 @@ static Fpm__Message *create_route_message(qpb_allocator_t *allocator,
 	fpm__message__init(msg);
 
 	if (!re) {
+		msg->has_type = 1;
 		msg->type = FPM__MESSAGE__TYPE__DELETE_ROUTE;
 		msg->delete_route =
 			create_delete_route_message(allocator, dest, re);
@@ -255,6 +259,7 @@ static Fpm__Message *create_route_message(qpb_allocator_t *allocator,
 		return msg;
 	}
 
+	msg->has_type = 1;
 	msg->type = FPM__MESSAGE__TYPE__ADD_ROUTE;
 	msg->add_route = create_add_route_message(allocator, dest, re);
 	if (!msg->add_route) {

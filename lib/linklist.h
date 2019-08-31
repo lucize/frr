@@ -21,6 +21,10 @@
 #ifndef _ZEBRA_LINKLIST_H
 #define _ZEBRA_LINKLIST_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* listnodes must always contain data to be valid. Adding an empty node
  * to a list is invalid
  */
@@ -52,56 +56,291 @@ struct list {
 };
 
 #define listnextnode(X) ((X) ? ((X)->next) : NULL)
+#define listnextnode_unchecked(X) ((X)->next)
 #define listhead(X) ((X) ? ((X)->head) : NULL)
+#define listhead_unchecked(X) ((X)->head)
 #define listtail(X) ((X) ? ((X)->tail) : NULL)
 #define listcount(X) ((X)->count)
 #define list_isempty(X) ((X)->head == NULL && (X)->tail == NULL)
 /* return X->data only if X and X->data are not NULL */
 #define listgetdata(X) (assert(X), assert((X)->data != NULL), (X)->data)
 
-/* Prototypes. */
-extern struct list *
-list_new(void); /* encouraged: set list.del callback on new lists */
-
-extern void listnode_add(struct list *, void *);
-extern void listnode_add_sort(struct list *, void *);
-extern struct listnode *listnode_add_after(struct list *, struct listnode *,
-					   void *);
-extern struct listnode *listnode_add_before(struct list *, struct listnode *,
-					    void *);
-extern void listnode_move_to_tail(struct list *, struct listnode *);
-extern void listnode_delete(struct list *, void *);
-extern struct listnode *listnode_lookup(struct list *, void *);
-extern void *listnode_head(struct list *);
+/*
+ * Create a new linked list.
+ *
+ * Returns:
+ *    the created linked list
+ */
+extern struct list *list_new(void);
 
 /*
- * The usage of list_delete is being transitioned to pass in
- * the double pointer to remove use after free's.
- * list_free usage is deprecated, it leads to memory leaks
- * of the linklist nodes.  Please use list_delete_and_null
+ * Add a new element to the tail of a list.
  *
- * In Oct of 2018, rename list_delete_and_null to list_delete
- * and remove list_delete_original and the list_delete #define
- * Additionally remove list_free entirely
+ * Runtime is O(1).
+ *
+ * list
+ *    list to operate on
+ *
+ * data
+ *    element to add
  */
-#if CONFDATE > 20181001
-CPP_NOTICE("list_delete without double pointer is deprecated, please fixup")
-#endif
-extern void list_delete_and_null(struct list **);
-extern void list_delete_original(struct list *);
-#define list_delete(X) list_delete_original((X))			\
-	CPP_WARN("Please transition to using list_delete_and_null")
-#define list_free(X) list_delete_original((X))				\
-	CPP_WARN("Please transition tousing list_delete_and_null")
+extern struct listnode *listnode_add(struct list *list, void *data);
 
-extern void list_delete_all_node(struct list *);
+/*
+ * Add a new element to the beginning of a list.
+ *
+ * Runtime is O(1).
+ *
+ * list
+ *    list to operate on
+ *
+ * data
+ *    element to add
+ */
+extern void listnode_add_head(struct list *list, void *data);
 
-/* For ospfd and ospf6d. */
-extern void list_delete_node(struct list *, struct listnode *);
+/*
+ * Insert a new element into a list with insertion sort.
+ *
+ * If list->cmp is set, this function is used to determine the position to
+ * insert the new element. If it is not set, this function is equivalent to
+ * listnode_add.
+ *
+ * Runtime is O(N).
+ *
+ * list
+ *    list to operate on
+ *
+ * val
+ *    element to add
+ */
+extern void listnode_add_sort(struct list *list, void *val);
 
-/* For ospf_spf.c */
-extern void list_add_list(struct list *, struct list *);
+/*
+ * Insert a new element into a list after another element.
+ *
+ * Runtime is O(1).
+ *
+ * list
+ *    list to operate on
+ *
+ * pp
+ *    listnode to insert after
+ *
+ * data
+ *    data to insert
+ *
+ * Returns:
+ *    pointer to newly created listnode that contains the inserted data
+ */
+extern struct listnode *listnode_add_after(struct list *list,
+					   struct listnode *pp, void *data);
 
+/*
+ * Insert a new element into a list before another element.
+ *
+ * Runtime is O(1).
+ *
+ * list
+ *    list to operate on
+ *
+ * pp
+ *    listnode to insert before
+ *
+ * data
+ *    data to insert
+ *
+ * Returns:
+ *    pointer to newly created listnode that contains the inserted data
+ */
+extern struct listnode *listnode_add_before(struct list *list,
+					    struct listnode *pp, void *data);
+
+/*
+ * Move a node to the tail of a list.
+ *
+ * Runtime is O(1).
+ *
+ * list
+ *    list to operate on
+ *
+ * node
+ *    node to move to tail
+ */
+extern void listnode_move_to_tail(struct list *list, struct listnode *node);
+
+/*
+ * Delete an element from a list.
+ *
+ * Runtime is O(N).
+ *
+ * list
+ *    list to operate on
+ *
+ * data
+ *    data to insert into list
+ */
+extern void listnode_delete(struct list *list, const void *data);
+
+/*
+ * Find the listnode corresponding to an element in a list.
+ *
+ * list
+ *    list to operate on
+ *
+ * data
+ *    data to search for
+ *
+ * Returns:
+ *    pointer to listnode storing the given data if found, NULL otherwise
+ */
+extern struct listnode *listnode_lookup(struct list *list, const void *data);
+
+/*
+ * Retrieve the element at the head of a list.
+ *
+ * list
+ *    list to operate on
+ *
+ * Returns:
+ *    data at head of list, or NULL if list is empty
+ */
+extern void *listnode_head(struct list *list);
+
+/*
+ * Duplicate a list.
+ *
+ * list
+ *    list to duplicate
+ *
+ * Returns:
+ *    copy of the list
+ */
+extern struct list *list_dup(struct list *l);
+
+/*
+ * Sort a list in place.
+ *
+ * The sorting algorithm used is quicksort. Runtimes are equivalent to those of
+ * quicksort plus N. The sort is not stable.
+ *
+ * For portability reasons, the comparison function takes a pointer to pointer
+ * to void. This pointer should be dereferenced to get the actual data pointer.
+ * It is always safe to do this.
+ *
+ * list
+ *    list to sort
+ *
+ * cmp
+ *    comparison function for quicksort. Should return less than, equal to or
+ *    greater than zero if the first argument is less than, equal to or greater
+ *    than the second argument.
+ */
+extern void list_sort(struct list *list,
+		      int (*cmp)(const void **, const void **));
+
+/*
+ * Convert a list to an array of void pointers.
+ *
+ * Starts from the list head and ends either on the last node of the list or
+ * when the provided array cannot store any more elements.
+ *
+ * list
+ *    list to convert
+ *
+ * arr
+ *    Pre-allocated array of void *
+ *
+ * arrlen
+ *    Number of elements in arr
+ *
+ * Returns:
+ *    arr
+ */
+void **list_to_array(struct list *list, void **arr, size_t arrlen);
+
+/*
+ * Delete a list and NULL its pointer.
+ *
+ * If non-null, list->del is called with each data element.
+ *
+ * plist
+ *    pointer to list pointer; this will be set to NULL after the list has been
+ *    deleted
+ */
+extern void list_delete(struct list **plist);
+
+/*
+ * Delete all nodes from a list without deleting the list itself.
+ *
+ * If non-null, list->del is called with each data element.
+ *
+ * list
+ *    list to operate on
+ */
+extern void list_delete_all_node(struct list *list);
+
+/*
+ * Delete a node from a list.
+ *
+ * list->del is not called with the data associated with the node.
+ *
+ * Runtime is O(1).
+ *
+ * list
+ *    list to operate on
+ *
+ * node
+ *    the node to delete
+ */
+extern void list_delete_node(struct list *list, struct listnode *node);
+
+/*
+ * Append a list to an existing list.
+ *
+ * Runtime is O(N) where N = listcount(add).
+ *
+ * list
+ *    list to append to
+ *
+ * add
+ *    list to append
+ */
+extern void list_add_list(struct list *list, struct list *add);
+
+/*
+ * Delete all nodes which satisfy a condition from a list.
+ * Deletes the node if cond function returns true for the node.
+ * If function ptr passed is NULL, it deletes all nodes
+ *
+ * list
+ *    list to operate on
+ * cond
+ *    function pointer which takes node data as input and return true or false
+ */
+
+extern void list_filter_out_nodes(struct list *list, bool (*cond)(void *data));
+
+/*
+ * Insert a new element into a list with insertion sort if there is no
+ * duplicate element present in the list. This assumes the input list is
+ * sorted. If unsorted, it will check for duplicate until it finds out
+ * the position to do insertion sort with the unsorted list.
+ *
+ * If list->cmp is set, this function is used to determine the position to
+ * insert the new element. If it is not set, this function is equivalent to
+ * listnode_add. duplicate element is determined by cmp function returning 0.
+ *
+ * Runtime is O(N).
+ *
+ * list
+ *    list to operate on
+ *
+ * val
+ *    element to add
+ */
+
+extern bool listnode_add_sort_nodup(struct list *list, void *val);
 /* List iteration macro.
  * Usage: for (ALL_LIST_ELEMENTS (...) { ... }
  * It is safe to delete the listnode using this macro.
@@ -109,7 +348,8 @@ extern void list_add_list(struct list *, struct list *);
 #define ALL_LIST_ELEMENTS(list, node, nextnode, data)                          \
 	(node) = listhead(list), ((data) = NULL);                              \
 	(node) != NULL                                                         \
-		&& ((data) = listgetdata(node), (nextnode) = node->next, 1);   \
+		&& ((data) = static_cast(data, listgetdata(node)),             \
+		    (nextnode) = node->next, 1);                               \
 	(node) = (nextnode), ((data) = NULL)
 
 /* read-only list iteration macro.
@@ -120,7 +360,7 @@ extern void list_add_list(struct list *, struct list *);
  */
 #define ALL_LIST_ELEMENTS_RO(list, node, data)                                 \
 	(node) = listhead(list), ((data) = NULL);                              \
-	(node) != NULL && ((data) = listgetdata(node), 1);                     \
+	(node) != NULL && ((data) = static_cast(data, listgetdata(node)), 1);  \
 	(node) = listnextnode(node), ((data) = NULL)
 
 /* these *do not* cleanup list nodes and referenced data, as the functions
@@ -153,5 +393,19 @@ extern void list_add_list(struct list *, struct list *);
 			(L)->tail = (N)->prev;                                 \
 		(L)->count--;                                                  \
 	} while (0)
+
+extern struct listnode *listnode_lookup_nocheck(struct list *list, void *data);
+
+/*
+ * Add a node to *list, if non-NULL. Otherwise, allocate a new list, mail
+ * it back in *list, and add a new node.
+ *
+ * Return: the new node.
+ */
+extern struct listnode *listnode_add_force(struct list **list, void *val);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ZEBRA_LINKLIST_H */

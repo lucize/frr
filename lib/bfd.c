@@ -34,8 +34,8 @@
 
 DEFINE_MTYPE_STATIC(LIB, BFD_INFO, "BFD info")
 
-int bfd_debug = 0;
-struct bfd_gbl bfd_gbl;
+static int bfd_debug = 0;
+static struct bfd_gbl bfd_gbl;
 
 /*
  * bfd_gbl_init - Initialize the BFD global structure
@@ -84,8 +84,8 @@ void bfd_info_free(struct bfd_info **bfd_info)
  * bfd_validate_param - Validate the BFD paramter information.
  */
 int bfd_validate_param(struct vty *vty, const char *dm_str, const char *rx_str,
-		       const char *tx_str, u_int8_t *dm_val, u_int32_t *rx_val,
-		       u_int32_t *tx_val)
+		       const char *tx_str, uint8_t *dm_val, uint32_t *rx_val,
+		       uint32_t *tx_val)
 {
 	*dm_val = strtoul(dm_str, NULL, 10);
 	*rx_val = strtoul(rx_str, NULL, 10);
@@ -96,9 +96,8 @@ int bfd_validate_param(struct vty *vty, const char *dm_str, const char *rx_str,
 /*
  * bfd_set_param - Set the configured BFD paramter values
  */
-void bfd_set_param(struct bfd_info **bfd_info, u_int32_t min_rx,
-		   u_int32_t min_tx, u_int8_t detect_mult, int defaults,
-		   int *command)
+void bfd_set_param(struct bfd_info **bfd_info, uint32_t min_rx, uint32_t min_tx,
+		   uint8_t detect_mult, int defaults, int *command)
 {
 	if (!*bfd_info) {
 		*bfd_info = bfd_info_create();
@@ -128,14 +127,14 @@ void bfd_set_param(struct bfd_info **bfd_info, u_int32_t min_rx,
  */
 void bfd_peer_sendmsg(struct zclient *zclient, struct bfd_info *bfd_info,
 		      int family, void *dst_ip, void *src_ip, char *if_name,
-		      int ttl, int multihop, int command, int set_flag,
-		      vrf_id_t vrf_id)
+		      int ttl, int multihop, int cbit, int command,
+		      int set_flag, vrf_id_t vrf_id)
 {
 	struct stream *s;
 	int ret;
 	int len;
 
-	/* Individual reg/dereg messages are supressed during shutdown. */
+	/* Individual reg/dereg messages are suppressed during shutdown. */
 	if (CHECK_FLAG(bfd_gbl.flags, BFD_GBL_FLAG_IN_SHUTDOWN)) {
 		if (bfd_debug)
 			zlog_debug(
@@ -209,6 +208,11 @@ void bfd_peer_sendmsg(struct zclient *zclient, struct bfd_info *bfd_info,
 			stream_putc(s, 0);
 		}
 	}
+	/* cbit */
+	if (cbit)
+		stream_putc(s, 1);
+	else
+		stream_putc(s, 0);
 
 	stream_putw_at(s, 0, stream_get_endp(s));
 
@@ -254,11 +258,13 @@ const char *bfd_get_command_dbg_str(int command)
  */
 struct interface *bfd_get_peer_info(struct stream *s, struct prefix *dp,
 				    struct prefix *sp, int *status,
+				    int *remote_cbit,
 				    vrf_id_t vrf_id)
 {
 	unsigned int ifindex;
 	struct interface *ifp = NULL;
 	int plen;
+	int local_remote_cbit;
 
 	/* Get interface index. */
 	ifindex = stream_getl(s);
@@ -293,6 +299,9 @@ struct interface *bfd_get_peer_info(struct stream *s, struct prefix *dp,
 		stream_get(&sp->u.prefix, s, plen);
 		sp->prefixlen = stream_getc(s);
 	}
+	local_remote_cbit = stream_getc(s);
+	if (remote_cbit)
+		*remote_cbit = local_remote_cbit;
 	return ifp;
 }
 
@@ -343,7 +352,7 @@ static void bfd_last_update(time_t last_update, char *buf, size_t len)
  * bfd_show_param - Show the BFD parameter information.
  */
 void bfd_show_param(struct vty *vty, struct bfd_info *bfd_info, int bfd_tag,
-		    int extra_space, u_char use_json, json_object *json_obj)
+		    int extra_space, bool use_json, json_object *json_obj)
 {
 	json_object *json_bfd = NULL;
 
@@ -379,7 +388,7 @@ void bfd_show_param(struct vty *vty, struct bfd_info *bfd_info, int bfd_tag,
  * bfd_show_status - Show the BFD status information.
  */
 static void bfd_show_status(struct vty *vty, struct bfd_info *bfd_info,
-			    int bfd_tag, int extra_space, u_char use_json,
+			    int bfd_tag, int extra_space, bool use_json,
 			    json_object *json_bfd)
 {
 	char time_buf[32];
@@ -403,7 +412,7 @@ static void bfd_show_status(struct vty *vty, struct bfd_info *bfd_info,
  * bfd_show_info - Show the BFD information.
  */
 void bfd_show_info(struct vty *vty, struct bfd_info *bfd_info, int multihop,
-		   int extra_space, u_char use_json, json_object *json_obj)
+		   int extra_space, bool use_json, json_object *json_obj)
 {
 	json_object *json_bfd = NULL;
 
@@ -434,7 +443,8 @@ void bfd_show_info(struct vty *vty, struct bfd_info *bfd_info, int multihop,
  * bfd_client_sendmsg - Format and send a client register
  *                    command to Zebra to be forwarded to BFD
  */
-void bfd_client_sendmsg(struct zclient *zclient, int command)
+void bfd_client_sendmsg(struct zclient *zclient, int command,
+			vrf_id_t vrf_id)
 {
 	struct stream *s;
 	int ret;
@@ -451,7 +461,7 @@ void bfd_client_sendmsg(struct zclient *zclient, int command)
 
 	s = zclient->obuf;
 	stream_reset(s);
-	zclient_create_header(s, command, VRF_DEFAULT);
+	zclient_create_header(s, command, vrf_id);
 
 	stream_putl(s, getpid());
 

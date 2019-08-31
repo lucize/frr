@@ -1,6 +1,4 @@
 /*
- * $Id: heavy.c,v 1.3 2005/04/25 16:42:24 paul Exp $
- *
  * This file is part of Quagga.
  *
  * Quagga is free software; you can redistribute it and/or modify it
@@ -94,12 +92,12 @@ DEFUN (clear_foo,
 	return CMD_SUCCESS;
 }
 
-static void slow_vty_init()
+static void slow_vty_init(void)
 {
 	install_element(VIEW_NODE, &clear_foo_cmd);
 }
 
-void test_init()
+void test_init(void)
 {
 	slow_vty_init();
 }

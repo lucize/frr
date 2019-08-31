@@ -23,6 +23,14 @@
 #define __ZEBRA_NS_H__
 
 #include <lib/ns.h>
+#include <lib/vrf.h>
+
+#include "zebra/rib.h"
+#include "zebra/zebra_vrf.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #ifdef HAVE_NETLINK
 /* Socket interface to kernel */
@@ -42,24 +50,30 @@ struct zebra_ns {
 	ns_id_t ns_id;
 
 #ifdef HAVE_NETLINK
-	struct nlsock netlink;     /* kernel messages */
-	struct nlsock netlink_cmd; /* command channel */
+	struct nlsock netlink;        /* kernel messages */
+	struct nlsock netlink_cmd;    /* command channel */
+	struct nlsock netlink_dplane; /* dataplane channel */
 	struct thread *t_netlink;
 #endif
 
 	struct route_table *if_table;
 
-#if defined(HAVE_RTADV)
-	struct rtadv rtadv;
-#endif /* HAVE_RTADV */
+	/* Back pointer */
+	struct ns *ns;
 };
-
-#define NS_DEFAULT 0
-#define NS_UNKNOWN UINT16_MAX
 
 struct zebra_ns *zebra_ns_lookup(ns_id_t ns_id);
 
-int zebra_ns_init(void);
+int zebra_ns_init(const char *optional_default_name);
 int zebra_ns_enable(ns_id_t ns_id, void **info);
-int zebra_ns_disable(ns_id_t ns_id, void **info);
+int zebra_ns_disabled(struct ns *ns);
+int zebra_ns_early_shutdown(struct ns *ns);
+int zebra_ns_final_shutdown(struct ns *ns);
+
+int zebra_ns_config_write(struct vty *vty, struct ns *ns);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif

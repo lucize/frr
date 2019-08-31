@@ -30,6 +30,16 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 
+/*
+ * The append_history function only appears in newer versions
+ * of the readline library it appears like.  Since we don't
+ * need this just silently ignore the code on these
+ * ancient platforms.
+ */
+#if !defined HAVE_APPEND_HISTORY
+#define append_history(A, B)
+#endif
+
 #include <lib/version.h>
 #include "getopt.h"
 #include "command.h"
@@ -37,6 +47,8 @@
 #include "linklist.h"
 #include "memory_vty.h"
 #include "libfrr.h"
+#include "ferr.h"
+#include "lib_errors.h"
 
 #include "vtysh/vtysh.h"
 #include "vtysh/vtysh_user.h"
@@ -52,13 +64,16 @@ static gid_t elevgid, realgid;
 #define FRR_CONFIG_NAME "frr.conf"
 
 /* Configuration file name and directory. */
-static char vtysh_config[MAXPATHLEN];
-char frr_config[MAXPATHLEN];
+static char vtysh_config[MAXPATHLEN * 3];
+char frr_config[MAXPATHLEN * 3];
 char vtydir[MAXPATHLEN];
 static char history_file[MAXPATHLEN];
 
 /* Flag for indicate executing child command. */
 int execute_flag = 0;
+
+/* Flag to indicate if in user/unprivileged mode. */
+int user_mode;
 
 /* For sigsetjmp() & siglongjmp(). */
 static sigjmp_buf jmpbuf;
@@ -150,6 +165,7 @@ static void usage(int status)
 		       "    --vty_socket         Override vty socket path\n"
 		       "    --config_dir         Override config directory path\n"
 		       "-N  --pathspace          Insert prefix into config & socket paths\n"
+		       "-u  --user               Run as an unprivileged user\n"
 		       "-w, --writeconfig        Write integrated config (frr.conf) and exit\n"
 		       "-h, --help               Display this help and exit\n\n"
 		       "Note that multiple commands may be executed from the command\n"
@@ -180,6 +196,7 @@ struct option longopts[] = {
 	{"mark", no_argument, NULL, 'm'},
 	{"writeconfig", no_argument, NULL, 'w'},
 	{"pathspace", required_argument, NULL, 'N'},
+	{"user", no_argument, NULL, 'u'},
 	{0}};
 
 /* Read a string, and return a pointer to it.  Returns NULL on EOF. */
@@ -301,6 +318,7 @@ int main(int argc, char **argv, char **env)
 	char *homedir = NULL;
 	int ditch_suid = 0;
 	char sysconfdir[MAXPATHLEN];
+	const char *pathspace_arg = NULL;
 	char pathspace[MAXPATHLEN] = "";
 
 	/* SUID: drop down to calling user & go back up when needed */
@@ -310,15 +328,20 @@ int main(int argc, char **argv, char **env)
 	realgid = getgid();
 	suid_off();
 
+	user_mode = 0;		/* may be set in options processing */
+
 	/* Preserve name of myself. */
 	progname = ((p = strrchr(argv[0], '/')) ? ++p : argv[0]);
 
 	strlcpy(sysconfdir, frr_sysconfdir, sizeof(sysconfdir));
+
+	frr_init_vtydir();
 	strlcpy(vtydir, frr_vtydir, sizeof(vtydir));
 
 	/* Option handling. */
 	while (1) {
-		opt = getopt_long(argc, argv, "be:c:d:nf:mEhCwN:", longopts, 0);
+		opt = getopt_long(argc, argv, "be:c:d:nf:mEhCwN:u",
+				  longopts, 0);
 
 		if (opt == EOF)
 			break;
@@ -347,7 +370,7 @@ int main(int argc, char **argv, char **env)
 			break;
 		case OPTION_CONFDIR:
 			ditch_suid = 1; /* option disables SUID */
-			strlcpy(sysconfdir, optarg, sizeof(sysconfdir));
+			snprintf(sysconfdir, sizeof(sysconfdir), "%s/", optarg);
 			break;
 		case 'N':
 			if (strchr(optarg, '/') || strchr(optarg, '.')) {
@@ -355,7 +378,8 @@ int main(int argc, char **argv, char **env)
 					"slashes or dots are not permitted in the --pathspace option.\n");
 				exit(1);
 			}
-			snprintf(pathspace, sizeof(pathspace), "/%s", optarg);
+			pathspace_arg = optarg;
+			snprintf(pathspace, sizeof(pathspace), "%s/", optarg);
 			break;
 		case 'd':
 			daemon_name = optarg;
@@ -374,6 +398,9 @@ int main(int argc, char **argv, char **env)
 			break;
 		case 'C':
 			dryrun = 1;
+			break;
+		case 'u':
+			user_mode = 1;
 			break;
 		case 'w':
 			writeconfig = 1;
@@ -408,7 +435,11 @@ int main(int argc, char **argv, char **env)
 		 pathspace, VTYSH_CONFIG_NAME);
 	snprintf(frr_config, sizeof(frr_config), "%s%s%s", sysconfdir,
 		 pathspace, FRR_CONFIG_NAME);
-	strlcat(vtydir, pathspace, sizeof(vtydir));
+
+	if (pathspace_arg) {
+		strlcat(vtydir, "/", sizeof(vtydir));
+		strlcat(vtydir, pathspace_arg, sizeof(vtydir));
+	}
 
 	/* Initialize user input buffer. */
 	line_read = NULL;
@@ -425,11 +456,16 @@ int main(int argc, char **argv, char **env)
 
 	vty_init_vtysh();
 
-	/* Read vtysh configuration file before connecting to daemons.
-	 * (file may not be readable to calling user in SUID mode) */
-	suid_on();
-	vtysh_read_config(vtysh_config);
-	suid_off();
+	if (!user_mode) {
+		/* Read vtysh configuration file before connecting to daemons.
+		 * (file may not be readable to calling user in SUID mode) */
+		suid_on();
+		vtysh_read_config(vtysh_config);
+		suid_off();
+	}
+	/* Error code library system */
+	log_ref_init();
+	lib_error_init();
 
 	if (markfile) {
 		if (!inputfile) {
@@ -452,7 +488,8 @@ int main(int argc, char **argv, char **env)
 	}
 
 	if (dryrun && cmd && cmd->line) {
-		vtysh_execute("enable");
+		if (!user_mode)
+			vtysh_execute("enable");
 		while (cmd) {
 			struct cmd_rec *cr;
 			char *cmdnow = cmd->line, *next;
@@ -508,6 +545,14 @@ int main(int argc, char **argv, char **env)
 	suid_off();
 
 	if (writeconfig) {
+		if (user_mode) {
+			fprintf(stderr,
+				"writeconfig cannot be used when running as an unprivileged user.\n");
+			if (no_error)
+				exit(0);
+			else
+				exit(1);
+		}
 		vtysh_execute("enable");
 		return vtysh_write_config_integrated();
 	}
@@ -526,8 +571,8 @@ int main(int argc, char **argv, char **env)
 	 */
 	homedir = vtysh_get_home();
 	if (homedir) {
-		snprintf(history_file, sizeof(history_file),
-			 "%s/.history_quagga", homedir);
+		snprintf(history_file, sizeof(history_file), "%s/.history_frr",
+			 homedir);
 		if (read_history(history_file) != 0) {
 			int fp;
 
@@ -554,10 +599,10 @@ int main(int argc, char **argv, char **env)
 	/* If eval mode. */
 	if (cmd && cmd->line) {
 		/* Enter into enable node. */
-		vtysh_execute("enable");
+		if (!user_mode)
+			vtysh_execute("enable");
 
 		while (cmd != NULL) {
-			int ret;
 			char *eol;
 
 			while ((eol = strchr(cmd->line, '\n')) != NULL) {
@@ -592,7 +637,17 @@ int main(int argc, char **argv, char **env)
 			if (logfile)
 				log_it(cmd->line);
 
-			ret = vtysh_execute_no_pager(cmd->line);
+			/*
+			 * Parsing logic for regular commands will be different
+			 * than for those commands requiring further
+			 * processing, such as cli instructions terminating
+			 * with question-mark character.
+			 */
+			if (!vtysh_execute_command_questionmark(cmd->line))
+				ret = CMD_SUCCESS;
+			else
+				ret = vtysh_execute_no_pager(cmd->line);
+
 			if (!no_error
 			    && !(ret == CMD_SUCCESS || ret == CMD_SUCCESS_DAEMON
 				 || ret == CMD_WARNING))
@@ -613,7 +668,7 @@ int main(int argc, char **argv, char **env)
 	/* Boot startup configuration file. */
 	if (boot_flag) {
 		vtysh_flock_config(frr_config);
-		int ret = vtysh_read_config(frr_config);
+		ret = vtysh_read_config(frr_config);
 		vtysh_unflock_config();
 		if (ret) {
 			fprintf(stderr,
@@ -627,14 +682,13 @@ int main(int argc, char **argv, char **env)
 			exit(0);
 	}
 
-	vtysh_pager_init();
-
 	vtysh_readline_init();
 
 	vty_hello(vty);
 
 	/* Enter into enable node. */
-	vtysh_execute("enable");
+	if (!user_mode)
+		vtysh_execute("enable");
 
 	/* Preparation for longjmp() in sigtstp(). */
 	sigsetjmp(jmpbuf, 1);
@@ -643,6 +697,8 @@ int main(int argc, char **argv, char **env)
 	/* Main command loop. */
 	while (vtysh_rl_gets())
 		vtysh_execute(line_read);
+
+	vtysh_uninit();
 
 	history_truncate_file(history_file, 1000);
 	printf("\n");

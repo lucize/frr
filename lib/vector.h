@@ -24,6 +24,10 @@
 
 #include "memory.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* struct for vector */
 struct _vector {
 	unsigned int active;  /* number of active slots */
@@ -52,6 +56,8 @@ extern int vector_set(vector v, void *val);
 extern int vector_set_index(vector v, unsigned int i, void *val);
 extern void vector_unset(vector v, unsigned int i);
 extern void vector_unset_value(vector v, void *val);
+extern void vector_remove(vector v, unsigned int ix);
+extern void vector_compact(vector v);
 
 extern unsigned int vector_count(vector v);
 extern void vector_free(vector v);
@@ -59,5 +65,11 @@ extern vector vector_copy(vector v);
 
 extern void *vector_lookup(vector, unsigned int);
 extern void *vector_lookup_ensure(vector, unsigned int);
+extern void vector_to_array(vector v, void ***dest, int *argc);
+extern vector array_to_vector(void **src, int argc);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ZEBRA_VECTOR_H */

@@ -53,21 +53,15 @@
 #include "eigrpd/eigrp_topology.h"
 #include "eigrpd/eigrp_fsm.h"
 
-static int eigrp_interface_add(int, struct zclient *, zebra_size_t, vrf_id_t);
-static int eigrp_interface_delete(int, struct zclient *, zebra_size_t,
-				  vrf_id_t);
-static int eigrp_interface_address_add(int, struct zclient *, zebra_size_t,
-				       vrf_id_t vrf_id);
-static int eigrp_interface_address_delete(int, struct zclient *, zebra_size_t,
-					  vrf_id_t vrf_id);
-static int eigrp_interface_state_up(int, struct zclient *, zebra_size_t,
-				    vrf_id_t vrf_id);
-static int eigrp_interface_state_down(int, struct zclient *, zebra_size_t,
-				      vrf_id_t vrf_id);
+static int eigrp_interface_add(ZAPI_CALLBACK_ARGS);
+static int eigrp_interface_delete(ZAPI_CALLBACK_ARGS);
+static int eigrp_interface_address_add(ZAPI_CALLBACK_ARGS);
+static int eigrp_interface_address_delete(ZAPI_CALLBACK_ARGS);
+static int eigrp_interface_state_up(ZAPI_CALLBACK_ARGS);
+static int eigrp_interface_state_down(ZAPI_CALLBACK_ARGS);
 static struct interface *zebra_interface_if_lookup(struct stream *);
 
-static int eigrp_zebra_read_route(int, struct zclient *, zebra_size_t,
-				  vrf_id_t vrf_id);
+static int eigrp_zebra_read_route(ZAPI_CALLBACK_ARGS);
 
 /* Zebra structure to hold current status. */
 struct zclient *zclient = NULL;
@@ -77,8 +71,7 @@ extern struct thread_master *master;
 struct in_addr router_id_zebra;
 
 /* Router-id update message from zebra. */
-static int eigrp_router_id_update_zebra(int command, struct zclient *zclient,
-					zebra_size_t length, vrf_id_t vrf_id)
+static int eigrp_router_id_update_zebra(ZAPI_CALLBACK_ARGS)
 {
 	struct eigrp *eigrp;
 	struct prefix router_id;
@@ -94,13 +87,13 @@ static int eigrp_router_id_update_zebra(int command, struct zclient *zclient,
 	return 0;
 }
 
-static int eigrp_zebra_notify_owner(int command, struct zclient *zclient,
-				    zebra_size_t length, vrf_id_t vrf_id)
+static int eigrp_zebra_route_notify_owner(ZAPI_CALLBACK_ARGS)
 {
 	struct prefix p;
 	enum zapi_route_notify_owner note;
+	uint32_t table;
 
-	if (!zapi_route_notify_decode(zclient->ibuf, &p, &note))
+	if (!zapi_route_notify_decode(zclient->ibuf, &p, &table, &note))
 		return -1;
 
 	return 0;
@@ -113,9 +106,9 @@ static void eigrp_zebra_connected(struct zclient *zclient)
 
 void eigrp_zebra_init(void)
 {
-	struct zclient_options opt = { .receive_notify = false };
+	struct zclient_options opt = {.receive_notify = false};
 
-	zclient = zclient_new_notify(master, &opt);
+	zclient = zclient_new(master, &opt);
 
 	zclient_init(zclient, ZEBRA_ROUTE_EIGRP, 0, &eigrpd_privs);
 	zclient->zebra_connected = eigrp_zebra_connected;
@@ -128,13 +121,12 @@ void eigrp_zebra_init(void)
 	zclient->interface_address_delete = eigrp_interface_address_delete;
 	zclient->redistribute_route_add = eigrp_zebra_read_route;
 	zclient->redistribute_route_del = eigrp_zebra_read_route;
-	zclient->notify_owner = eigrp_zebra_notify_owner;
+	zclient->route_notify_owner = eigrp_zebra_route_notify_owner;
 }
 
 
 /* Zebra route add and delete treatment. */
-static int eigrp_zebra_read_route(int command, struct zclient *zclient,
-				  zebra_size_t length, vrf_id_t vrf_id)
+static int eigrp_zebra_read_route(ZAPI_CALLBACK_ARGS)
 {
 	struct zapi_route api;
 	struct eigrp *eigrp;
@@ -149,9 +141,9 @@ static int eigrp_zebra_read_route(int command, struct zclient *zclient,
 	if (eigrp == NULL)
 		return 0;
 
-	if (command == ZEBRA_REDISTRIBUTE_ROUTE_ADD) {
+	if (cmd == ZEBRA_REDISTRIBUTE_ROUTE_ADD) {
 
-	} else /* if (command == ZEBRA_REDISTRIBUTE_ROUTE_DEL) */
+	} else /* if (cmd == ZEBRA_REDISTRIBUTE_ROUTE_DEL) */
 	{
 	}
 
@@ -159,8 +151,7 @@ static int eigrp_zebra_read_route(int command, struct zclient *zclient,
 }
 
 /* Inteface addition message from zebra. */
-static int eigrp_interface_add(int command, struct zclient *zclient,
-			       zebra_size_t length, vrf_id_t vrf_id)
+static int eigrp_interface_add(ZAPI_CALLBACK_ARGS)
 {
 	struct interface *ifp;
 	struct eigrp_interface *ei;
@@ -179,8 +170,7 @@ static int eigrp_interface_add(int command, struct zclient *zclient,
 	return 0;
 }
 
-static int eigrp_interface_delete(int command, struct zclient *zclient,
-				  zebra_size_t length, vrf_id_t vrf_id)
+static int eigrp_interface_delete(ZAPI_CALLBACK_ARGS)
 {
 	struct interface *ifp;
 	struct stream *s;
@@ -204,19 +194,17 @@ static int eigrp_interface_delete(int command, struct zclient *zclient,
 			ifp->metric, ifp->mtu);
 
 	if (ifp->info)
-		eigrp_if_free(ifp->info,
-			      INTERFACE_DOWN_BY_ZEBRA);
+		eigrp_if_free(ifp->info, INTERFACE_DOWN_BY_ZEBRA);
 
 	if_set_index(ifp, IFINDEX_INTERNAL);
 	return 0;
 }
 
-static int eigrp_interface_address_add(int command, struct zclient *zclient,
-				       zebra_size_t length, vrf_id_t vrf_id)
+static int eigrp_interface_address_add(ZAPI_CALLBACK_ARGS)
 {
 	struct connected *c;
 
-	c = zebra_interface_address_read(command, zclient->ibuf, vrf_id);
+	c = zebra_interface_address_read(cmd, zclient->ibuf, vrf_id);
 
 	if (c == NULL)
 		return 0;
@@ -233,14 +221,13 @@ static int eigrp_interface_address_add(int command, struct zclient *zclient,
 	return 0;
 }
 
-static int eigrp_interface_address_delete(int command, struct zclient *zclient,
-					  zebra_size_t length, vrf_id_t vrf_id)
+static int eigrp_interface_address_delete(ZAPI_CALLBACK_ARGS)
 {
 	struct connected *c;
 	struct interface *ifp;
 	struct eigrp_interface *ei;
 
-	c = zebra_interface_address_read(command, zclient->ibuf, vrf_id);
+	c = zebra_interface_address_read(cmd, zclient->ibuf, vrf_id);
 
 	if (c == NULL)
 		return 0;
@@ -258,15 +245,15 @@ static int eigrp_interface_address_delete(int command, struct zclient *zclient,
 		return 0;
 
 	/* Call interface hook functions to clean up */
-	eigrp_if_free(ei, INTERFACE_DOWN_BY_ZEBRA);
+	if (prefix_cmp(&ei->address, c->address) == 0)
+		eigrp_if_free(ei, INTERFACE_DOWN_BY_ZEBRA);
 
 	connected_free(c);
 
 	return 0;
 }
 
-static int eigrp_interface_state_up(int command, struct zclient *zclient,
-				    zebra_size_t length, vrf_id_t vrf_id)
+static int eigrp_interface_state_up(ZAPI_CALLBACK_ARGS)
 {
 	struct interface *ifp;
 
@@ -322,8 +309,7 @@ static int eigrp_interface_state_up(int command, struct zclient *zclient,
 	return 0;
 }
 
-static int eigrp_interface_state_down(int command, struct zclient *zclient,
-				      zebra_size_t length, vrf_id_t vrf_id)
+static int eigrp_interface_state_down(ZAPI_CALLBACK_ARGS)
 {
 	struct interface *ifp;
 
@@ -353,7 +339,8 @@ static struct interface *zebra_interface_if_lookup(struct stream *s)
 	return if_lookup_by_name(ifname_tmp, VRF_DEFAULT);
 }
 
-void eigrp_zebra_route_add(struct prefix *p, struct list *successors)
+void eigrp_zebra_route_add(struct prefix *p, struct list *successors,
+			   uint32_t distance)
 {
 	struct zapi_route api;
 	struct zapi_nexthop *api_nh;
@@ -368,15 +355,18 @@ void eigrp_zebra_route_add(struct prefix *p, struct list *successors)
 	api.vrf_id = VRF_DEFAULT;
 	api.type = ZEBRA_ROUTE_EIGRP;
 	api.safi = SAFI_UNICAST;
+	api.metric = distance;
 	memcpy(&api.prefix, p, sizeof(*p));
 
 	SET_FLAG(api.message, ZAPI_MESSAGE_NEXTHOP);
+	SET_FLAG(api.message, ZAPI_MESSAGE_METRIC);
 
 	/* Nexthop, ifindex, distance and metric information. */
 	for (ALL_LIST_ELEMENTS_RO(successors, node, te)) {
 		if (count >= MULTIPATH_NUM)
 			break;
 		api_nh = &api.nexthops[count];
+		api_nh->vrf_id = VRF_DEFAULT;
 		if (te->adv_router->src.s_addr) {
 			api_nh->gate.ipv4 = te->adv_router->src;
 			api_nh->type = NEXTHOP_TYPE_IPV4_IFINDEX;
@@ -424,7 +414,7 @@ void eigrp_zebra_route_delete(struct prefix *p)
 int eigrp_is_type_redistributed(int type)
 {
 	return ((DEFAULT_ROUTE_TYPE(type))
-			? vrf_bitmap_check(zclient->default_information,
+			? vrf_bitmap_check(zclient->default_information[AFI_IP],
 					   VRF_DEFAULT)
 			: vrf_bitmap_check(zclient->redist[AFI_IP][type],
 					   VRF_DEFAULT));

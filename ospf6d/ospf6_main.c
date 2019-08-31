@@ -43,6 +43,7 @@
 #include "ospf6d.h"
 #include "ospf6_top.h"
 #include "ospf6_message.h"
+#include "ospf6_network.h"
 #include "ospf6_asbr.h"
 #include "ospf6_lsa.h"
 #include "ospf6_interface.h"
@@ -84,8 +85,10 @@ static void __attribute__((noreturn)) ospf6_exit(int status)
 
 	frr_early_fini();
 
-	if (ospf6)
+	if (ospf6) {
 		ospf6_delete(ospf6);
+		ospf6 = NULL;
+	}
 
 	bfd_gbl_exit();
 
@@ -96,6 +99,15 @@ static void __attribute__((noreturn)) ospf6_exit(int status)
 	ospf6_message_terminate();
 	ospf6_asbr_terminate();
 	ospf6_lsa_terminate();
+
+	ospf6_serv_close();
+	/* reverse access_list_init */
+	access_list_reset();
+
+	/* reverse prefix_list_init */
+	prefix_list_add_hook(NULL);
+	prefix_list_delete_hook(NULL);
+	prefix_list_reset();
 
 	vrf_terminate();
 
@@ -154,6 +166,10 @@ struct quagga_signal_t ospf6_signals[] = {
 	},
 };
 
+static const struct frr_yang_module_info *ospf6d_yang_modules[] = {
+	&frr_interface_info,
+};
+
 FRR_DAEMON_INFO(ospf6d, OSPF6, .vty_port = OSPF6_VTY_PORT,
 
 		.proghelp = "Implementation of the OSPFv3 routing protocol.",
@@ -161,7 +177,8 @@ FRR_DAEMON_INFO(ospf6d, OSPF6, .vty_port = OSPF6_VTY_PORT,
 		.signals = ospf6_signals,
 		.n_signals = array_size(ospf6_signals),
 
-		.privs = &ospf6d_privs, )
+		.privs = &ospf6d_privs, .yang_modules = ospf6d_yang_modules,
+		.n_yang_modules = array_size(ospf6d_yang_modules), )
 
 /* Main routine of ospf6d. Treatment of argument and starting ospf finite
    state machine is handled here. */
@@ -194,10 +211,13 @@ int main(int argc, char *argv[], char *envp[])
 		exit(1);
 	}
 
+	/* OSPF6 master init. */
+	ospf6_master_init();
+
 	/* thread master */
 	master = frr_init();
 
-	vrf_init(NULL, NULL, NULL, NULL);
+	vrf_init(NULL, NULL, NULL, NULL, NULL);
 	access_list_init();
 	prefix_list_init();
 

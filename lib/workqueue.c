@@ -81,9 +81,6 @@ struct work_queue *work_queue_new(struct thread_master *m,
 
 	new = XCALLOC(MTYPE_WORK_QUEUE, sizeof(struct work_queue));
 
-	if (new == NULL)
-		return new;
-
 	new->name = XSTRDUP(MTYPE_WORK_QUEUE_NAME, queue_name);
 	new->master = m;
 	SET_FLAG(new->flags, WQ_UNPLUGGED);
@@ -94,15 +91,18 @@ struct work_queue *work_queue_new(struct thread_master *m,
 
 	new->cycles.granularity = WORK_QUEUE_MIN_GRANULARITY;
 
-	/* Default values, can be overriden by caller */
+	/* Default values, can be overridden by caller */
 	new->spec.hold = WORK_QUEUE_DEFAULT_HOLD;
 	new->spec.yield = THREAD_YIELD_TIME_SLOT;
+	new->spec.retry = WORK_QUEUE_DEFAULT_RETRY;
 
 	return new;
 }
 
-void work_queue_free(struct work_queue *wq)
+void work_queue_free_and_null(struct work_queue **wqp)
 {
+	struct work_queue *wq = *wqp;
+
 	if (wq->thread != NULL)
 		thread_cancel(wq->thread);
 
@@ -116,7 +116,8 @@ void work_queue_free(struct work_queue *wq)
 
 	XFREE(MTYPE_WORK_QUEUE_NAME, wq->name);
 	XFREE(MTYPE_WORK_QUEUE, wq);
-	return;
+
+	*wqp = NULL;
 }
 
 bool work_queue_is_scheduled(struct work_queue *wq)
@@ -127,11 +128,20 @@ bool work_queue_is_scheduled(struct work_queue *wq)
 static int work_queue_schedule(struct work_queue *wq, unsigned int delay)
 {
 	/* if appropriate, schedule work queue thread */
-	if (CHECK_FLAG(wq->flags, WQ_UNPLUGGED) && (wq->thread == NULL) &&
-	    !work_queue_empty(wq)) {
+	if (CHECK_FLAG(wq->flags, WQ_UNPLUGGED) && (wq->thread == NULL)
+	    && !work_queue_empty(wq)) {
 		wq->thread = NULL;
-		thread_add_timer_msec(wq->master, work_queue_run, wq, delay,
-				      &wq->thread);
+
+		/* Schedule timer if there's a delay, otherwise just schedule
+		 * as an 'event'
+		 */
+		if (delay > 0)
+			thread_add_timer_msec(wq->master, work_queue_run, wq,
+					      delay, &wq->thread);
+		else
+			thread_add_event(wq->master, work_queue_run, wq, 0,
+					 &wq->thread);
+
 		/* set thread yield time, if needed */
 		if (wq->thread && wq->spec.yield != THREAD_YIELD_TIME_SLOT)
 			thread_set_yield_time(wq->thread, wq->spec.yield);
@@ -146,10 +156,7 @@ void work_queue_add(struct work_queue *wq, void *data)
 
 	assert(wq);
 
-	if (!(item = work_queue_item_new(wq))) {
-		zlog_err("%s: unable to get new queue item", __func__);
-		return;
-	}
+	item = work_queue_item_new(wq);
 
 	item->data = data;
 	work_queue_item_enqueue(wq, item);
@@ -159,7 +166,8 @@ void work_queue_add(struct work_queue *wq, void *data)
 	return;
 }
 
-static void work_queue_item_requeue(struct work_queue *wq, struct work_queue_item *item)
+static void work_queue_item_requeue(struct work_queue *wq,
+				    struct work_queue_item *item)
 {
 	work_queue_item_dequeue(wq, item);
 
@@ -233,14 +241,15 @@ int work_queue_run(struct thread *thread)
 {
 	struct work_queue *wq;
 	struct work_queue_item *item, *titem;
-	wq_item_status ret;
+	wq_item_status ret = WQ_SUCCESS;
 	unsigned int cycles = 0;
 	char yielded = 0;
 
 	wq = THREAD_ARG(thread);
-	wq->thread = NULL;
 
 	assert(wq);
+
+	wq->thread = NULL;
 
 	/* calculate cycle granularity:
 	 * list iteration == 1 run
@@ -265,13 +274,13 @@ int work_queue_run(struct thread *thread)
 		wq->cycles.granularity = WORK_QUEUE_MIN_GRANULARITY;
 
 	STAILQ_FOREACH_SAFE (item, &wq->items, wq, titem) {
-		assert(item && item->data);
+		assert(item->data);
 
 		/* dont run items which are past their allowed retries */
 		if (item->ran > wq->spec.max_retries) {
 			/* run error handler, if any */
 			if (wq->spec.errorfunc)
-				wq->spec.errorfunc(wq, item->data);
+				wq->spec.errorfunc(wq, item);
 			work_queue_item_remove(wq, item);
 			continue;
 		}
@@ -374,9 +383,14 @@ stats:
 #endif
 
 	/* Is the queue done yet? If it is, call the completion callback. */
-	if (!work_queue_empty(wq))
-		work_queue_schedule(wq, 0);
-	else if (wq->spec.completion_func)
+	if (!work_queue_empty(wq)) {
+		if (ret == WQ_RETRY_LATER ||
+		    ret == WQ_QUEUE_BLOCKED)
+			work_queue_schedule(wq, wq->spec.retry);
+		else
+			work_queue_schedule(wq, 0);
+
+	} else if (wq->spec.completion_func)
 		wq->spec.completion_func(wq);
 
 	return 0;

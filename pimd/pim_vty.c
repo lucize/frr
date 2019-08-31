@@ -39,6 +39,8 @@
 #include "pim_msdp.h"
 #include "pim_ssm.h"
 #include "pim_bfd.h"
+#include "pim_bsm.h"
+#include "pim_vxlan.h"
 
 int pim_debug_config_write(struct vty *vty)
 {
@@ -68,13 +70,14 @@ int pim_debug_config_write(struct vty *vty)
 		vty_out(vty, "debug igmp trace\n");
 		++writes;
 	}
-	if (PIM_DEBUG_IGMP_TRACE_DETAIL) {
-		vty_out(vty, "debug igmp trace detail\n");
-		++writes;
-	}
 
 	if (PIM_DEBUG_MROUTE) {
 		vty_out(vty, "debug mroute\n");
+		++writes;
+	}
+
+	if (PIM_DEBUG_MTRACE) {
+		vty_out(vty, "debug mtrace\n");
 		++writes;
 	}
 
@@ -111,6 +114,16 @@ int pim_debug_config_write(struct vty *vty)
 
 	if (PIM_DEBUG_ZEBRA) {
 		vty_out(vty, "debug pim zebra\n");
+		++writes;
+	}
+
+	if (PIM_DEBUG_BSM) {
+		vty_out(vty, "debug pim bsm\n");
+		++writes;
+	}
+
+	if (PIM_DEBUG_VXLAN) {
+		vty_out(vty, "debug pim vxlan\n");
 		++writes;
 	}
 
@@ -158,7 +171,7 @@ int pim_global_config_write_worker(struct pim_instance *pim, struct vty *vty)
 	else
 		sprintf(spaces, "%s", " ");
 
-	writes += pim_msdp_config_write_helper(pim, vty, spaces);
+	writes += pim_msdp_config_write(pim, vty, spaces);
 
 	if (!pim->send_v6_secondary) {
 		vty_out(vty, "%sno ip pim send-v6-secondary\n", spaces);
@@ -167,15 +180,15 @@ int pim_global_config_write_worker(struct pim_instance *pim, struct vty *vty)
 
 	writes += pim_rp_config_write(pim, vty, spaces);
 
-	if (qpim_register_suppress_time
+	if (router->register_suppress_time
 	    != PIM_REGISTER_SUPPRESSION_TIME_DEFAULT) {
 		vty_out(vty, "%sip pim register-suppress-time %d\n", spaces,
-			qpim_register_suppress_time);
+			router->register_suppress_time);
 		++writes;
 	}
-	if (qpim_t_periodic != PIM_DEFAULT_T_PERIODIC) {
+	if (router->t_periodic != PIM_DEFAULT_T_PERIODIC) {
 		vty_out(vty, "%sip pim join-prune-interval %d\n", spaces,
-			qpim_t_periodic);
+			router->t_periodic);
 		++writes;
 	}
 	if (pim->keep_alive_time != PIM_KEEPALIVE_PERIOD) {
@@ -188,9 +201,9 @@ int pim_global_config_write_worker(struct pim_instance *pim, struct vty *vty)
 			pim->rp_keep_alive_time);
 		++writes;
 	}
-	if (qpim_packet_process != PIM_DEFAULT_PACKET_PROCESS) {
+	if (router->packet_process != PIM_DEFAULT_PACKET_PROCESS) {
 		vty_out(vty, "%sip pim packets %d\n", spaces,
-			qpim_packet_process);
+			router->packet_process);
 		++writes;
 	}
 	if (ssm->plist_name) {
@@ -209,10 +222,10 @@ int pim_global_config_write_worker(struct pim_instance *pim, struct vty *vty)
 				spaces);
 		++writes;
 	}
-	if (qpim_ecmp_rebalance_enable) {
+	if (pim->ecmp_rebalance_enable) {
 		vty_out(vty, "%sip pim ecmp rebalance\n", spaces);
 		++writes;
-	} else if (qpim_ecmp_enable) {
+	} else if (pim->ecmp_enable) {
 		vty_out(vty, "%sip pim ecmp\n", spaces);
 		++writes;
 	}
@@ -229,12 +242,9 @@ int pim_global_config_write_worker(struct pim_instance *pim, struct vty *vty)
 		}
 	}
 
-	return writes;
-}
+	pim_vxlan_config_write(vty, spaces, &writes);
 
-int pim_global_config_write(struct vty *vty)
-{
-	return pim_global_config_write_worker(pimg, vty);
+	return writes;
 }
 
 int pim_interface_config_write(struct vty *vty)
@@ -258,11 +268,16 @@ int pim_interface_config_write(struct vty *vty)
 					  ifp->name, vrf->name);
 			++writes;
 
+			if (ifp->desc) {
+				vty_out(vty, " description %s\n", ifp->desc);
+				++writes;
+			}
+
 			if (ifp->info) {
 				struct pim_interface *pim_ifp = ifp->info;
 
 				if (PIM_IF_TEST_PIM(pim_ifp->options)) {
-					vty_out(vty, " ip pim sm\n");
+					vty_out(vty, " ip pim\n");
 					++writes;
 				}
 
@@ -313,6 +328,15 @@ int pim_interface_config_write(struct vty *vty)
 					++writes;
 				}
 
+				/* IF ip igmp query-max-response-time */
+				if (pim_ifp->igmp_query_max_response_time_dsec
+				    != IGMP_QUERY_MAX_RESPONSE_TIME_DSEC) {
+					vty_out(vty,
+						" ip igmp query-max-response-time %d\n",
+						pim_ifp->igmp_query_max_response_time_dsec);
+					++writes;
+				}
+
 				/* IF ip igmp query-interval */
 				if (pim_ifp->igmp_default_query_interval
 				    != IGMP_GENERAL_QUERY_INTERVAL) {
@@ -322,13 +346,22 @@ int pim_interface_config_write(struct vty *vty)
 					++writes;
 				}
 
-				/* IF ip igmp query-max-response-time */
-				if (pim_ifp->igmp_query_max_response_time_dsec
-				    != IGMP_QUERY_MAX_RESPONSE_TIME_DSEC) {
+				/* IF ip igmp last-member_query-count */
+				if (pim_ifp->igmp_last_member_query_count
+				    != IGMP_DEFAULT_ROBUSTNESS_VARIABLE) {
 					vty_out(vty,
-						" ip igmp query-max-response-time %d\n",
-						pim_ifp->igmp_query_max_response_time_dsec);
+						" ip igmp last-member-query-count %d\n",
+						pim_ifp->igmp_last_member_query_count);
 					++writes;
+				}
+
+				/* IF ip igmp last-member_query-interval */
+				if (pim_ifp->igmp_specific_query_max_response_time_dsec
+				    != IGMP_SPECIFIC_QUERY_MAX_RESPONSE_TIME_DSEC) {
+					vty_out(vty,
+						" ip igmp last-member-query-interval %d\n",
+						pim_ifp->igmp_specific_query_max_response_time_dsec);
+					  ++writes;
 				}
 
 				/* IF ip igmp join */
@@ -357,6 +390,9 @@ int pim_interface_config_write(struct vty *vty)
 					}
 				}
 
+				if (pim_ifp->activeactive)
+					vty_out(vty, " ip pim active-active\n");
+
 				/* boundary */
 				if (pim_ifp->boundary_oil_plist) {
 					vty_out(vty,
@@ -367,7 +403,10 @@ int pim_interface_config_write(struct vty *vty)
 
 				writes +=
 					pim_static_write_mroute(pim, vty, ifp);
+				pim_bsm_write_config(vty, ifp);
+				++writes;
 				pim_bfd_write_config(vty, ifp);
+				++writes;
 			}
 			vty_endframe(vty, "!\n");
 			++writes;
