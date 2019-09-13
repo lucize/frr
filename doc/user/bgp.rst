@@ -368,6 +368,16 @@ Administrative Distance Metrics
 
    Sets the administrative distance for a particular route.
 
+.. _bgp-requires-policy:
+
+Require policy on EBGP
+-------------------------------
+
+.. index:: [no] bgp ebgp-requires-policy
+.. clicmd:: [no] bgp ebgp-requires-policy
+
+   This command requires incoming and outgoing filters to be applied for eBGP sessions. Without the incoming filter, no routes will be accepted. Without the outgoing filter, no routes will be announced.
+
 .. _bgp-route-flap-dampening:
 
 Route Flap Dampening
@@ -675,6 +685,11 @@ Route Aggregation-IPv4 Address Family
 
    This command specifies an aggregate address.
 
+.. index:: aggregate-address A.B.C.D/M route-map NAME
+.. clicmd:: aggregate-address A.B.C.D/M route-map NAME
+
+   Apply a route-map for an aggregated prefix.
+
 .. index:: aggregate-address A.B.C.D/M as-set
 .. clicmd:: aggregate-address A.B.C.D/M as-set
 
@@ -689,11 +704,11 @@ Route Aggregation-IPv4 Address Family
 
 .. index:: no aggregate-address A.B.C.D/M
 .. clicmd:: no aggregate-address A.B.C.D/M
-   
+
    This command removes an aggregate address.
 
 
-   This configuration example setup the aggregate-address under 
+   This configuration example setup the aggregate-address under
    ipv4 address-family.
 
    .. code-block:: frr
@@ -703,6 +718,7 @@ Route Aggregation-IPv4 Address Family
         aggregate-address 10.0.0.0/8
         aggregate-address 20.0.0.0/8 as-set
         aggregate-address 40.0.0.0/8 summary-only
+        aggregate-address 50.0.0.0/8 route-map aggr-rmap
        exit-address-family
 
 
@@ -715,6 +731,11 @@ Route Aggregation-IPv6 Address Family
 .. clicmd:: aggregate-address X:X::X:X/M
 
    This command specifies an aggregate address.
+
+.. index:: aggregate-address X:X::X:X/M route-map NAME
+.. clicmd:: aggregate-address X:X::X:X/M route-map NAME
+
+   Apply a route-map for an aggregated prefix.
 
 .. index:: aggregate-address X:X::X:X/M as-set
 .. clicmd:: aggregate-address X:X::X:X/M as-set
@@ -734,16 +755,17 @@ Route Aggregation-IPv6 Address Family
    This command removes an aggregate address.
 
 
-   This configuration example setup the aggregate-address under 
-   ipv4 address-family.
+   This configuration example setup the aggregate-address under
+   ipv6 address-family.
 
    .. code-block:: frr
 
       router bgp 1
        address-family ipv6 unicast
         aggregate-address 10::0/64
-	aggregate-address 20::0/64 as-set
-	aggregate-address 40::0/64 summary-only
+        aggregate-address 20::0/64 as-set
+        aggregate-address 40::0/64 summary-only
+        aggregate-address 50::0/64 route-map aggr-rmap
        exit-address-family
 
 .. _bgp-redistribute-to-bgp:
@@ -2251,6 +2273,12 @@ structure is extended with :clicmd:`show bgp [afi] [safi]`.
    Show a bgp peer summary for the specified address family, and subsequent
    address-family.
 
+.. index:: show bgp [afi] [safi] summary failed [json]
+.. clicmd:: show bgp [afi] [safi] summary failed [json]
+
+   Show a bgp peer summary for peers that are not succesfully exchanging routes
+   for the specified address family, and subsequent address-family.
+
 .. index:: show bgp [afi] [safi] neighbor [PEER]
 .. clicmd:: show bgp [afi] [safi] neighbor [PEER]
 
@@ -2305,7 +2333,7 @@ attribute.
 Displaying Routes by Large Community Attribute
 ----------------------------------------------
 
-The following commands allow displaying routes based on their 
+The following commands allow displaying routes based on their
 large community attribute.
 
 .. index:: show [ip] bgp <ipv4|ipv6> large-community
@@ -2322,8 +2350,8 @@ large community attribute.
 
    These commands display BGP routes which have the large community attribute.
    attribute. When ``LARGE-COMMUNITY`` is specified, BGP routes that match that
-   large community are displayed. When `exact-match` is specified, it display 
-   only routes that have an exact match. When `json` is specified, it display 
+   large community are displayed. When `exact-match` is specified, it display
+   only routes that have an exact match. When `json` is specified, it display
    routes in json format.
 
 .. index:: show [ip] bgp <ipv4|ipv6> large-community-list WORD
@@ -2336,8 +2364,8 @@ large community attribute.
 .. clicmd:: show [ip] bgp <ipv4|ipv6> large-community-list WORD json
 
    These commands display BGP routes for the address family specified that
-   match the specified large community list. When `exact-match` is specified, 
-   it displays only routes that have an exact match. When `json` is specified, 
+   match the specified large community list. When `exact-match` is specified,
+   it displays only routes that have an exact match. When `json` is specified,
    it display routes in json format.
 
 .. _bgp-display-routes-by-as-path:

@@ -130,6 +130,7 @@ static int interface_state_up(ZAPI_CALLBACK_ARGS)
 
 		/* Install any static reliant on this interface coming up */
 		static_install_intf_nh(ifp);
+		static_ifindex_update(ifp, true);
 	}
 
 	return 0;
@@ -137,7 +138,12 @@ static int interface_state_up(ZAPI_CALLBACK_ARGS)
 
 static int interface_state_down(ZAPI_CALLBACK_ARGS)
 {
-	zebra_interface_state_read(zclient->ibuf, vrf_id);
+	struct interface *ifp;
+
+	ifp = zebra_interface_state_read(zclient->ibuf, vrf_id);
+
+	if (ifp)
+		static_ifindex_update(ifp, false);
 
 	return 0;
 }
@@ -194,6 +200,25 @@ struct static_nht_data {
 	uint8_t nh_num;
 };
 
+/* API to check whether the configured nexthop address is
+ * one of its local connected address or not.
+ */
+static bool
+static_nexthop_is_local(vrf_id_t vrfid, struct prefix *addr, int family)
+{
+	if (family == AF_INET) {
+		if (if_lookup_exact_address(&addr->u.prefix4,
+					AF_INET,
+					vrfid))
+			return true;
+	} else if (family == AF_INET6) {
+		if (if_lookup_exact_address(&addr->u.prefix6,
+					AF_INET6,
+					vrfid))
+			return true;
+	}
+	return false;
+}
 static int static_zebra_nexthop_update(ZAPI_CALLBACK_ARGS)
 {
 	struct static_nht_data *nhtd, lookup;
@@ -207,6 +232,12 @@ static int static_zebra_nexthop_update(ZAPI_CALLBACK_ARGS)
 
 	if (nhr.prefix.family == AF_INET6)
 		afi = AFI_IP6;
+
+	if (nhr.type == ZEBRA_ROUTE_CONNECT) {
+		if (static_nexthop_is_local(vrf_id, &nhr.prefix,
+					nhr.prefix.family))
+			nhr.nexthop_num = 0;
+	}
 
 	memset(&lookup, 0, sizeof(lookup));
 	lookup.nh = &nhr.prefix;

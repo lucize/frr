@@ -505,7 +505,9 @@ static void unmap_vni_from_rt(struct bgp *bgp, struct bgpevpn *vpn,
 static void form_auto_rt(struct bgp *bgp, vni_t vni, struct list *rtl)
 {
 	struct ecommunity_val eval;
-	struct ecommunity *ecomadd;
+	struct ecommunity *ecomadd, *ecom;
+	bool ecom_found = false;
+	struct listnode *node;
 
 	if (bgp->advertise_autort_rfc8365)
 		vni |= EVPN_AUTORT_VXLAN;
@@ -513,7 +515,12 @@ static void form_auto_rt(struct bgp *bgp, vni_t vni, struct list *rtl)
 
 	ecomadd = ecommunity_new();
 	ecommunity_add_val(ecomadd, &eval);
-	listnode_add_sort(rtl, ecomadd);
+	for (ALL_LIST_ELEMENTS_RO(rtl, node, ecom))
+		if (ecommunity_cmp(ecomadd, ecom))
+			ecom_found = true;
+
+	if (!ecom_found)
+		listnode_add_sort(rtl, ecomadd);
 }
 
 /*
@@ -5661,6 +5668,8 @@ int bgp_evpn_local_l3vni_del(vni_t l3vni, vrf_id_t vrf_id)
 	for (ALL_LIST_ELEMENTS(bgp_vrf->l2vnis, node, next, vpn))
 		bgpevpn_unlink_from_l3vni(vpn);
 
+	UNSET_FLAG(bgp_vrf->vrf_flags, BGP_VRF_L3VNI_PREFIX_ROUTES_ONLY);
+
 	/* Delete the instance if it was autocreated */
 	if (CHECK_FLAG(bgp_vrf->vrf_flags, BGP_VRF_AUTO))
 		bgp_delete(bgp_vrf);
@@ -5802,6 +5811,9 @@ int bgp_evpn_local_vni_add(struct bgp *bgp, vni_t vni,
 	/* If we are advertising gateway mac-ip
 	   It needs to be conveyed again to zebra */
 	bgp_zebra_advertise_gw_macip(bgp, vpn->advertise_gw_macip, vpn->vni);
+
+	/* advertise svi mac-ip knob to zebra */
+	bgp_zebra_advertise_svi_macip(bgp, vpn->advertise_svi_macip, vpn->vni);
 
 	return 0;
 }

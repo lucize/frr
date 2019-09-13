@@ -269,13 +269,16 @@ route_match_peer(void *rule, const struct prefix *prefix,
 
 		/* If su='0.0.0.0' (command 'match peer local'), and it's a
 		   NETWORK,
-		    REDISTRIBUTE or DEFAULT_GENERATED route => return RMAP_MATCH
+		    REDISTRIBUTE, AGGREGATE-ADDRESS or DEFAULT_GENERATED route
+		   => return RMAP_MATCH
 		   */
 		if (sockunion_same(su, &su_def)) {
 			int ret;
 			if (CHECK_FLAG(peer->rmap_type, PEER_RMAP_TYPE_NETWORK)
 			    || CHECK_FLAG(peer->rmap_type,
 					  PEER_RMAP_TYPE_REDISTRIBUTE)
+			    || CHECK_FLAG(peer->rmap_type,
+					  PEER_RMAP_TYPE_AGGREGATE)
 			    || CHECK_FLAG(peer->rmap_type,
 					  PEER_RMAP_TYPE_DEFAULT))
 				ret = RMAP_MATCH;
@@ -3057,7 +3060,7 @@ static int bgp_route_match_add(struct vty *vty, const char *command,
 {
 	VTY_DECLVAR_CONTEXT(route_map_index, index);
 	int retval = CMD_SUCCESS;
-	int ret;
+	enum rmap_compile_rets ret;
 
 	ret = route_map_add_match(index, command, arg, type);
 	switch (ret) {
@@ -3074,6 +3077,11 @@ static int bgp_route_match_add(struct vty *vty, const char *command,
 			route_map_upd8_dependency(type, arg, index->map->name);
 		}
 		break;
+	case RMAP_DUPLICATE_RULE:
+		/*
+		 * Intentionally doing nothing here.
+		 */
+		break;
 	}
 
 	return retval;
@@ -3084,7 +3092,7 @@ static int bgp_route_match_delete(struct vty *vty, const char *command,
 				  const char *arg, route_map_event_t type)
 {
 	VTY_DECLVAR_CONTEXT(route_map_index, index);
-	int ret;
+	enum rmap_compile_rets ret;
 	int retval = CMD_SUCCESS;
 	char *dep_name = NULL;
 	const char *tmpstr;
@@ -3116,6 +3124,11 @@ static int bgp_route_match_delete(struct vty *vty, const char *command,
 	case RMAP_COMPILE_SUCCESS:
 		if (type != RMAP_EVENT_MATCH_DELETED && dep_name)
 			route_map_upd8_dependency(type, dep_name, rmap_name);
+		break;
+	case RMAP_DUPLICATE_RULE:
+		/*
+		 * Nothing to do here
+		 */
 		break;
 	}
 
@@ -3238,6 +3251,7 @@ static void bgp_route_map_process_update(struct bgp *bgp, const char *rmap_name,
 	struct peer *peer;
 	struct bgp_node *bn;
 	struct bgp_static *bgp_static;
+	struct bgp_aggregate *aggregate;
 	struct listnode *node, *nnode;
 	struct route_map *map;
 	char buf[INET6_ADDRSTRLEN];
@@ -3319,6 +3333,35 @@ static void bgp_route_map_process_update(struct bgp *bgp, const char *rmap_name,
 							  INET6_ADDRSTRLEN));
 				bgp_static_update(bgp, &bn->p, bgp_static, afi,
 						  safi);
+			}
+		}
+
+		/* For aggregate-address route-map updates. */
+		for (bn = bgp_table_top(bgp->aggregate[afi][safi]); bn;
+		     bn = bgp_route_next(bn)) {
+			aggregate = bgp_node_get_bgp_aggregate_info(bn);
+			if (!aggregate)
+				continue;
+
+			if (!aggregate->rmap.name
+			    || (strcmp(rmap_name, aggregate->rmap.name) != 0))
+				continue;
+
+			if (!aggregate->rmap.map)
+				route_map_counter_increment(map);
+
+			aggregate->rmap.map = map;
+
+			if (route_update) {
+				if (bgp_debug_zebra(&bn->p))
+					zlog_debug(
+						"Processing route_map %s update on aggregate-address route %s",
+						rmap_name,
+						inet_ntop(bn->p.family,
+							  &bn->p.u.prefix, buf,
+							  INET6_ADDRSTRLEN));
+				bgp_aggregate_route(bgp, &bn->p, afi, safi,
+						    aggregate);
 			}
 		}
 	}

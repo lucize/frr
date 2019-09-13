@@ -122,6 +122,33 @@ static void nexthop_set_resolved(afi_t afi, const struct nexthop *newhop,
 	_nexthop_add(&nexthop->resolved, resolved_hop);
 }
 
+/* Checks if nexthop we are trying to resolve to is valid */
+static bool nexthop_valid_resolve(const struct nexthop *nexthop,
+				  const struct nexthop *resolved)
+{
+	/* Can't resolve to a recursive nexthop */
+	if (CHECK_FLAG(resolved->flags, NEXTHOP_FLAG_RECURSIVE))
+		return false;
+
+	switch (nexthop->type) {
+	case NEXTHOP_TYPE_IPV4_IFINDEX:
+	case NEXTHOP_TYPE_IPV6_IFINDEX:
+		/* If the nexthop we are resolving to does not match the
+		 * ifindex for the nexthop the route wanted, its not valid.
+		 */
+		if (nexthop->ifindex != resolved->ifindex)
+			return false;
+		break;
+	case NEXTHOP_TYPE_IPV4:
+	case NEXTHOP_TYPE_IPV6:
+	case NEXTHOP_TYPE_IFINDEX:
+	case NEXTHOP_TYPE_BLACKHOLE:
+		break;
+	}
+
+	return true;
+}
+
 /*
  * Given a nexthop we need to properly recursively resolve
  * the route.  As such, do a table lookup to find and match
@@ -138,6 +165,7 @@ static int nexthop_active(afi_t afi, struct route_entry *re,
 	struct nexthop *newhop;
 	struct interface *ifp;
 	rib_dest_t *dest;
+	struct zebra_vrf *zvrf;
 
 	if ((nexthop->type == NEXTHOP_TYPE_IPV4)
 	    || nexthop->type == NEXTHOP_TYPE_IPV6)
@@ -212,7 +240,9 @@ static int nexthop_active(afi_t afi, struct route_entry *re,
 	}
 	/* Lookup table.  */
 	table = zebra_vrf_table(afi, SAFI_UNICAST, nexthop->vrf_id);
-	if (!table) {
+	/* get zvrf */
+	zvrf = zebra_vrf_lookup_by_id(nexthop->vrf_id);
+	if (!table || !zvrf) {
 		if (IS_ZEBRA_DEBUG_RIB_DETAILED)
 			zlog_debug("\t%s: Table not found",
 				   __PRETTY_FUNCTION__);
@@ -242,7 +272,7 @@ static int nexthop_active(afi_t afi, struct route_entry *re,
 		/* However, do not resolve over default route unless explicitly
 		 * allowed. */
 		if (is_default_prefix(&rn->p)
-		    && !rnh_resolve_via_default(p.family)) {
+		    && !rnh_resolve_via_default(zvrf, p.family)) {
 			if (IS_ZEBRA_DEBUG_RIB_DETAILED)
 				zlog_debug(
 					"\t:%s: Resolved against default route",
@@ -284,8 +314,7 @@ static int nexthop_active(afi_t afi, struct route_entry *re,
 				if (!CHECK_FLAG(match->status,
 						ROUTE_ENTRY_INSTALLED))
 					continue;
-				if (CHECK_FLAG(newhop->flags,
-					       NEXTHOP_FLAG_RECURSIVE))
+				if (!nexthop_valid_resolve(nexthop, newhop))
 					continue;
 
 				SET_FLAG(nexthop->flags,
@@ -305,8 +334,7 @@ static int nexthop_active(afi_t afi, struct route_entry *re,
 				if (!CHECK_FLAG(match->status,
 						ROUTE_ENTRY_INSTALLED))
 					continue;
-				if (CHECK_FLAG(newhop->flags,
-					       NEXTHOP_FLAG_RECURSIVE))
+				if (!nexthop_valid_resolve(nexthop, newhop))
 					continue;
 
 				SET_FLAG(nexthop->flags,

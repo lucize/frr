@@ -1260,6 +1260,8 @@ static struct cmd_node bgp_vrf_policy_node = {BGP_VRF_POLICY_NODE,
 static struct cmd_node bgp_vnc_l2_group_node = {
 	BGP_VNC_L2_GROUP_NODE, "%s(config-router-vnc-l2-group)# "};
 
+static struct cmd_node bmp_node = {BMP_NODE, "%s(config-bgp-bmp)# "};
+
 static struct cmd_node ospf_node = {OSPF_NODE, "%s(config-router)# "};
 
 static struct cmd_node eigrp_node = {EIGRP_NODE, "%s(config-router)# "};
@@ -1335,7 +1337,7 @@ DEFUNSH(VTYSH_REALLYALL, vtysh_end_all, vtysh_end_all_cmd, "end",
 }
 
 DEFUNSH(VTYSH_BGPD, router_bgp, router_bgp_cmd,
-	"router bgp [(1-4294967295) [<view|vrf> WORD]]",
+	"router bgp [(1-4294967295)$instasn [<view|vrf> WORD]]",
 	ROUTER_STR BGP_STR AS_STR
 	"BGP view\nBGP VRF\n"
 	"View/VRF name\n")
@@ -1478,6 +1480,18 @@ DEFUNSH(VTYSH_BGPD,
 	return CMD_SUCCESS;
 }
 
+DEFUNSH(VTYSH_BGPD,
+	bmp_targets,
+	bmp_targets_cmd,
+	"bmp targets BMPTARGETS",
+	"BGP Monitoring Protocol\n"
+	"Create BMP target group\n"
+	"Name of the BMP target group\n")
+{
+	vty->node = BMP_NODE;
+	return CMD_SUCCESS;
+}
+
 DEFUNSH(VTYSH_BGPD, address_family_evpn, address_family_evpn_cmd,
 	"address-family <l2vpn evpn>",
 	"Enter Address Family command mode\n"
@@ -1585,10 +1599,11 @@ DEFUNSH(VTYSH_OSPFD, router_ospf, router_ospf_cmd,
 	return CMD_SUCCESS;
 }
 
-DEFUNSH(VTYSH_EIGRPD, router_eigrp, router_eigrp_cmd, "router eigrp (1-65535)",
+DEFUNSH(VTYSH_EIGRPD, router_eigrp, router_eigrp_cmd, "router eigrp (1-65535) [vrf NAME]",
 	"Enable a routing process\n"
 	"Start EIGRP configuration\n"
-	"AS number to use\n")
+	"AS number to use\n"
+	VRF_CMD_HELP_STR)
 {
 	vty->node = EIGRP_NODE;
 	return CMD_SUCCESS;
@@ -1842,6 +1857,7 @@ static int vtysh_exit(struct vty *vty)
 	case BGP_VNC_DEFAULTS_NODE:
 	case BGP_VNC_NVE_GROUP_NODE:
 	case BGP_VNC_L2_GROUP_NODE:
+	case BMP_NODE:
 		vty->node = BGP_NODE;
 		break;
 	case BGP_EVPN_VNI_NODE:
@@ -1930,6 +1946,19 @@ DEFUNSH(VTYSH_BGPD, rpki_quit, rpki_quit_cmd, "quit",
 	"Exit current mode and down to previous mode\n")
 {
 	return rpki_exit(self, vty, argc, argv);
+}
+
+DEFUNSH(VTYSH_BGPD, bmp_exit, bmp_exit_cmd, "exit",
+	"Exit current mode and down to previous mode\n")
+{
+	vtysh_exit(vty);
+	return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_BGPD, bmp_quit, bmp_quit_cmd, "quit",
+	"Exit current mode and down to previous mode\n")
+{
+	return bmp_exit(self, vty, argc, argv);
 }
 
 DEFUNSH(VTYSH_VRF, exit_vrf_config, exit_vrf_config_cmd, "exit-vrf",
@@ -3259,14 +3288,65 @@ DEFUN (no_vtysh_output_file,
 
 DEFUN(find,
       find_cmd,
-      "find COMMAND...",
-      "Find CLI command containing text\n"
-      "Text to search for\n")
+      "find REGEX",
+      "Find CLI command matching a regular expression\n"
+      "Search pattern (POSIX regex)\n")
 {
-	char *text = argv_concat(argv, argc, 1);
+	char *pattern = argv[1]->arg;
 	const struct cmd_node *node;
 	const struct cmd_element *cli;
 	vector clis;
+
+	regex_t exp = {};
+
+	int cr = regcomp(&exp, pattern, REG_NOSUB | REG_EXTENDED);
+
+	if (cr != 0) {
+		switch (cr) {
+		case REG_BADBR:
+			vty_out(vty, "%% Invalid \\{...\\} expression\n");
+			break;
+		case REG_BADRPT:
+			vty_out(vty, "%% Bad repetition operator\n");
+			break;
+		case REG_BADPAT:
+			vty_out(vty, "%% Regex syntax error\n");
+			break;
+		case REG_ECOLLATE:
+			vty_out(vty, "%% Invalid collating element\n");
+			break;
+		case REG_ECTYPE:
+			vty_out(vty, "%% Invalid character class name\n");
+			break;
+		case REG_EESCAPE:
+			vty_out(vty,
+				"%% Regex ended with escape character (\\)\n");
+			break;
+		case REG_ESUBREG:
+			vty_out(vty,
+				"%% Invalid number in \\digit construction\n");
+			break;
+		case REG_EBRACK:
+			vty_out(vty, "%% Unbalanced square brackets\n");
+			break;
+		case REG_EPAREN:
+			vty_out(vty, "%% Unbalanced parentheses\n");
+			break;
+		case REG_EBRACE:
+			vty_out(vty, "%% Unbalanced braces\n");
+			break;
+		case REG_ERANGE:
+			vty_out(vty,
+				"%% Invalid endpoint in range expression\n");
+			break;
+		case REG_ESPACE:
+			vty_out(vty, "%% Failed to compile (out of memory)\n");
+			break;
+		}
+
+		goto done;
+	}
+
 
 	for (unsigned int i = 0; i < vector_active(cmdvec); i++) {
 		node = vector_slot(cmdvec, i);
@@ -3275,14 +3355,15 @@ DEFUN(find,
 		clis = node->cmd_vector;
 		for (unsigned int j = 0; j < vector_active(clis); j++) {
 			cli = vector_slot(clis, j);
-			if (strcasestr(cli->string, text))
+
+			if (regexec(&exp, cli->string, 0, NULL, 0) == 0)
 				vty_out(vty, "  (%s)  %s\n",
 					node_names[node->node], cli->string);
 		}
 	}
 
-	XFREE(MTYPE_TMP, text);
-
+done:
+	regfree(&exp);
 	return CMD_SUCCESS;
 }
 
@@ -3620,6 +3701,7 @@ void vtysh_init_vty(void)
 	install_node(&openfabric_node, NULL);
 	install_node(&vty_node, NULL);
 	install_node(&rpki_node, NULL);
+	install_node(&bmp_node, NULL);
 #if HAVE_BFDD > 0
 	install_node(&bfd_node, NULL);
 	install_node(&bfd_peer_node, NULL);
@@ -3852,6 +3934,11 @@ void vtysh_init_vty(void)
 	install_element(BGP_IPV6L_NODE, &exit_address_family_cmd);
 	install_element(BGP_FLOWSPECV4_NODE, &exit_address_family_cmd);
 	install_element(BGP_FLOWSPECV6_NODE, &exit_address_family_cmd);
+
+	install_element(BGP_NODE, &bmp_targets_cmd);
+	install_element(BMP_NODE, &bmp_exit_cmd);
+	install_element(BMP_NODE, &bmp_quit_cmd);
+	install_element(BMP_NODE, &vtysh_end_all_cmd);
 
 	install_element(CONFIG_NODE, &rpki_cmd);
 	install_element(RPKI_NODE, &rpki_exit_cmd);

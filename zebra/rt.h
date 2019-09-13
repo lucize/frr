@@ -57,6 +57,8 @@ enum zebra_dplane_result kernel_address_update_ctx(
 
 enum zebra_dplane_result kernel_mac_update_ctx(struct zebra_dplane_ctx *ctx);
 
+enum zebra_dplane_result kernel_neigh_update_ctx(struct zebra_dplane_ctx *ctx);
+
 extern int kernel_neigh_update(int cmd, int ifindex, uint32_t addr, char *lla,
 			       int llalen, ns_id_t ns_id);
 extern int kernel_interface_set_master(struct interface *master,
@@ -66,15 +68,6 @@ extern int mpls_kernel_init(void);
 
 extern uint32_t kernel_get_speed(struct interface *ifp);
 extern int kernel_get_ipmr_sg_stats(struct zebra_vrf *zvrf, void *mroute);
-extern int kernel_add_vtep(vni_t vni, struct interface *ifp,
-			   struct in_addr *vtep_ip);
-extern int kernel_del_vtep(vni_t vni, struct interface *ifp,
-			   struct in_addr *vtep_ip);
-extern int kernel_add_neigh(struct interface *ifp, struct ipaddr *ip,
-			    struct ethaddr *mac, uint8_t flags);
-extern int kernel_del_neigh(struct interface *ifp, struct ipaddr *ip);
-extern int kernel_upd_neigh(struct interface *ifp, struct ipaddr *ip,
-                           struct ethaddr *mac, uint8_t flags, uint16_t state);
 
 /*
  * Southbound Initialization routines to get initial starting

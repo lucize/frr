@@ -1194,6 +1194,10 @@ struct peer {
 #define PEER_DOWN_BFD_DOWN              24 /* BFD down */
 #define PEER_DOWN_IF_DOWN               25 /* Interface down */
 #define PEER_DOWN_NBR_ADDR_DEL          26 /* Peer address lost */
+#define PEER_DOWN_WAITING_NHT           27 /* Waiting for NHT to resolve */
+#define PEER_DOWN_NBR_ADDR              28 /* Waiting for peer IPv6 IP Addr */
+#define PEER_DOWN_VRF_UNINIT            29 /* Associated VRF is not init yet */
+#define PEER_DOWN_NOAFI_ACTIVATED       30 /* No AFI/SAFI activated for peer */
 	size_t last_reset_cause_size;
 	uint8_t last_reset_cause[BGP_MAX_PACKET_SIZE];
 
@@ -1207,6 +1211,7 @@ struct peer {
 #define PEER_RMAP_TYPE_NOSET          (1 << 5) /* not allow to set commands */
 #define PEER_RMAP_TYPE_IMPORT         (1 << 6) /* neighbor route-map import */
 #define PEER_RMAP_TYPE_EXPORT         (1 << 7) /* neighbor route-map export */
+#define PEER_RMAP_TYPE_AGGREGATE      (1 << 8) /* aggregate-address route-map */
 
 	/* peer specific BFD information */
 	struct bfd_info *bfd_info;
@@ -1930,5 +1935,8 @@ extern struct peer *peer_new(struct bgp *bgp);
 
 extern struct peer *peer_lookup_in_view(struct vty *vty, struct bgp *bgp,
 					const char *ip_str, bool use_json);
+
+/* Hooks */
+DECLARE_HOOK(peer_status_changed, (struct peer * peer), (peer))
 
 #endif /* _QUAGGA_BGPD_H */
