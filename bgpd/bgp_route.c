@@ -5927,33 +5927,41 @@ void bgp_aggregate_route(struct bgp *bgp, struct prefix *p,
 			 */
 			/* Compute aggregate route's as-path.
 			 */
-			bgp_compute_aggregate_aspath(aggregate,
-						     pi->attr->aspath);
+			bgp_compute_aggregate_aspath_hash(aggregate,
+							  pi->attr->aspath);
 
 			/* Compute aggregate route's community.
 			 */
 			if (pi->attr->community)
-				bgp_compute_aggregate_community(
+				bgp_compute_aggregate_community_hash(
 							aggregate,
 							pi->attr->community);
 
 			/* Compute aggregate route's extended community.
 			 */
 			if (pi->attr->ecommunity)
-				bgp_compute_aggregate_ecommunity(
+				bgp_compute_aggregate_ecommunity_hash(
 							aggregate,
 							pi->attr->ecommunity);
 
 			/* Compute aggregate route's large community.
 			 */
 			if (pi->attr->lcommunity)
-				bgp_compute_aggregate_lcommunity(
+				bgp_compute_aggregate_lcommunity_hash(
 							aggregate,
 							pi->attr->lcommunity);
 		}
 		if (match)
 			bgp_process(bgp, rn, afi, safi);
 	}
+	if (aggregate->as_set) {
+		bgp_compute_aggregate_aspath_val(aggregate);
+		bgp_compute_aggregate_community_val(aggregate);
+		bgp_compute_aggregate_ecommunity_val(aggregate);
+		bgp_compute_aggregate_lcommunity_val(aggregate);
+	}
+
+
 	bgp_unlock_node(top);
 
 
@@ -6034,28 +6042,28 @@ void bgp_aggregate_delete(struct bgp *bgp, struct prefix *p, afi_t afi,
 			if (aggregate->as_set) {
 				/* Remove as-path from aggregate.
 				 */
-				bgp_remove_aspath_from_aggregate(
+				bgp_remove_aspath_from_aggregate_hash(
 							aggregate,
 							pi->attr->aspath);
 
 				if (pi->attr->community)
 					/* Remove community from aggregate.
 					 */
-					bgp_remove_community_from_aggregate(
+					bgp_remove_comm_from_aggregate_hash(
 							aggregate,
 							pi->attr->community);
 
 				if (pi->attr->ecommunity)
 					/* Remove ecommunity from aggregate.
 					 */
-					bgp_remove_ecommunity_from_aggregate(
+					bgp_remove_ecomm_from_aggregate_hash(
 							aggregate,
 							pi->attr->ecommunity);
 
 				if (pi->attr->lcommunity)
 					/* Remove lcommunity from aggregate.
 					 */
-					bgp_remove_lcommunity_from_aggregate(
+					bgp_remove_lcomm_from_aggregate_hash(
 							aggregate,
 							pi->attr->lcommunity);
 			}
@@ -6066,6 +6074,17 @@ void bgp_aggregate_delete(struct bgp *bgp, struct prefix *p, afi_t afi,
 		if (match)
 			bgp_process(bgp, rn, afi, safi);
 	}
+	if (aggregate->as_set) {
+		aspath_free(aggregate->aspath);
+		aggregate->aspath = NULL;
+		if (aggregate->community)
+			community_free(&aggregate->community);
+		if (aggregate->ecommunity)
+			ecommunity_free(&aggregate->ecommunity);
+		if (aggregate->lcommunity)
+			lcommunity_free(&aggregate->lcommunity);
+	}
+
 	bgp_unlock_node(top);
 }
 
@@ -6543,6 +6562,7 @@ DEFUN (aggregate_address_mask,
 	argv_find(argv, argc, "A.B.C.D", &idx);
 	char *prefix = argv[idx]->arg;
 	char *mask = argv[idx + 1]->arg;
+	bool rmap_found;
 	char *rmap = NULL;
 	int as_set =
 		argv_find(argv, argc, "as-set", &idx) ? AGGREGATE_AS_SET : 0;
@@ -6551,8 +6571,8 @@ DEFUN (aggregate_address_mask,
 				   ? AGGREGATE_SUMMARY_ONLY
 				   : 0;
 
-	argv_find(argv, argc, "WORD", &idx);
-	if (idx)
+	rmap_found = argv_find(argv, argc, "WORD", &idx);
+	if (rmap_found)
 		rmap = argv[idx]->arg;
 
 	char prefix_str[BUFSIZ];
@@ -6569,14 +6589,16 @@ DEFUN (aggregate_address_mask,
 
 DEFUN (no_aggregate_address,
        no_aggregate_address_cmd,
-       "no aggregate-address A.B.C.D/M [<as-set [summary-only]|summary-only [as-set]>]",
+       "no aggregate-address A.B.C.D/M [<as-set [summary-only]|summary-only [as-set]>] [route-map WORD]",
        NO_STR
        "Configure BGP aggregate entries\n"
        "Aggregate prefix\n"
        "Generate AS set path information\n"
        "Filter more specific routes from updates\n"
        "Filter more specific routes from updates\n"
-       "Generate AS set path information\n")
+       "Generate AS set path information\n"
+       "Apply route map to aggregate network\n"
+       "Name of route map\n")
 {
 	int idx = 0;
 	argv_find(argv, argc, "A.B.C.D/M", &idx);
@@ -6586,7 +6608,7 @@ DEFUN (no_aggregate_address,
 
 DEFUN (no_aggregate_address_mask,
        no_aggregate_address_mask_cmd,
-       "no aggregate-address A.B.C.D A.B.C.D [<as-set [summary-only]|summary-only [as-set]>]",
+       "no aggregate-address A.B.C.D A.B.C.D [<as-set [summary-only]|summary-only [as-set]>] [route-map WORD]",
        NO_STR
        "Configure BGP aggregate entries\n"
        "Aggregate address\n"
@@ -6594,7 +6616,9 @@ DEFUN (no_aggregate_address_mask,
        "Generate AS set path information\n"
        "Filter more specific routes from updates\n"
        "Filter more specific routes from updates\n"
-       "Generate AS set path information\n")
+       "Generate AS set path information\n"
+       "Apply route map to aggregate network\n"
+       "Name of route map\n")
 {
 	int idx = 0;
 	argv_find(argv, argc, "A.B.C.D", &idx);
@@ -6628,6 +6652,7 @@ DEFUN (ipv6_aggregate_address,
 	argv_find(argv, argc, "X:X::X:X/M", &idx);
 	char *prefix = argv[idx]->arg;
 	char *rmap = NULL;
+	bool rmap_found;
 	int as_set =
 		argv_find(argv, argc, "as-set", &idx) ? AGGREGATE_AS_SET : 0;
 
@@ -6636,8 +6661,8 @@ DEFUN (ipv6_aggregate_address,
 			       ? AGGREGATE_SUMMARY_ONLY
 			       : 0;
 
-	argv_find(argv, argc, "WORD", &idx);
-	if (idx)
+	rmap_found = argv_find(argv, argc, "WORD", &idx);
+	if (rmap_found)
 		rmap = argv[idx]->arg;
 
 	return bgp_aggregate_set(vty, prefix, AFI_IP6, SAFI_UNICAST, rmap,
@@ -6646,14 +6671,16 @@ DEFUN (ipv6_aggregate_address,
 
 DEFUN (no_ipv6_aggregate_address,
        no_ipv6_aggregate_address_cmd,
-       "no aggregate-address X:X::X:X/M [<as-set [summary-only]|summary-only [as-set]>]",
+       "no aggregate-address X:X::X:X/M [<as-set [summary-only]|summary-only [as-set]>] [route-map WORD]",
        NO_STR
        "Configure BGP aggregate entries\n"
        "Aggregate prefix\n"
        "Generate AS set path information\n"
        "Filter more specific routes from updates\n"
        "Filter more specific routes from updates\n"
-       "Generate AS set path information\n")
+       "Generate AS set path information\n"
+       "Apply route map to aggregate network\n"
+       "Name of route map\n")
 {
 	int idx = 0;
 	argv_find(argv, argc, "X:X::X:X/M", &idx);
@@ -7269,7 +7296,8 @@ void route_vty_out(struct vty *vty, struct prefix *p,
 
 			/* We display both LL & GL if both have been
 			 * received */
-			if ((attr->mp_nexthop_len == 32)
+			if ((attr->mp_nexthop_len
+			     == BGP_ATTR_NHLEN_IPV6_GLOBAL_AND_LL)
 			    || (path->peer->conf_if)) {
 				json_nexthop_ll = json_object_new_object();
 				json_object_string_add(
@@ -7301,7 +7329,8 @@ void route_vty_out(struct vty *vty, struct prefix *p,
 		} else {
 			/* Display LL if LL/Global both in table unless
 			 * prefer-global is set */
-			if (((attr->mp_nexthop_len == 32)
+			if (((attr->mp_nexthop_len
+			      == BGP_ATTR_NHLEN_IPV6_GLOBAL_AND_LL)
 			     && !attr->mp_nexthop_prefer_global)
 			    || (path->peer->conf_if)) {
 				if (path->peer->conf_if) {
@@ -11874,6 +11903,9 @@ uint8_t bgp_distance_apply(struct prefix *p, struct bgp_path_info *pinfo,
 		return 0;
 
 	peer = pinfo->peer;
+
+	if (pinfo->attr->distance)
+		return pinfo->attr->distance;
 
 	/* Check source address. */
 	sockunion2hostprefix(&peer->su, &q);

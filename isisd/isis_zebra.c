@@ -53,6 +53,8 @@
 
 struct zclient *zclient = NULL;
 
+DEFINE_HOOK(isis_if_new_hook, (struct interface *ifp), (ifp))
+
 /* Router-id update message from zebra. */
 static int isis_router_id_update_zebra(ZAPI_CALLBACK_ARGS)
 {
@@ -81,6 +83,8 @@ static int isis_zebra_if_add(ZAPI_CALLBACK_ARGS)
 	if (if_is_operative(ifp))
 		isis_csm_state_change(IF_UP_FROM_Z, circuit_scan_by_ifp(ifp),
 				      ifp);
+
+	hook_call(isis_if_new_hook, ifp);
 
 	return 0;
 }
@@ -219,9 +223,9 @@ static int isis_zebra_link_params(ZAPI_CALLBACK_ARGS)
 	return 0;
 }
 
-static void isis_zebra_route_add_route(struct prefix *prefix,
-				       struct prefix_ipv6 *src_p,
-				       struct isis_route_info *route_info)
+void isis_zebra_route_add_route(struct prefix *prefix,
+				struct prefix_ipv6 *src_p,
+				struct isis_route_info *route_info)
 {
 	struct zapi_route api;
 	struct zapi_nexthop *api_nh;
@@ -229,7 +233,7 @@ static void isis_zebra_route_add_route(struct prefix *prefix,
 	struct listnode *node;
 	int count = 0;
 
-	if (CHECK_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ZEBRA_SYNCED))
+	if (zclient->sock < 0)
 		return;
 
 	memset(&api, 0, sizeof(api));
@@ -292,17 +296,15 @@ static void isis_zebra_route_add_route(struct prefix *prefix,
 	api.nexthop_num = count;
 
 	zclient_route_send(ZEBRA_ROUTE_ADD, zclient, &api);
-	SET_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ZEBRA_SYNCED);
-	UNSET_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ZEBRA_RESYNC);
 }
 
-static void isis_zebra_route_del_route(struct prefix *prefix,
-				       struct prefix_ipv6 *src_p,
-				       struct isis_route_info *route_info)
+void isis_zebra_route_del_route(struct prefix *prefix,
+				struct prefix_ipv6 *src_p,
+				struct isis_route_info *route_info)
 {
 	struct zapi_route api;
 
-	if (!CHECK_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ZEBRA_SYNCED))
+	if (zclient->sock < 0)
 		return;
 
 	memset(&api, 0, sizeof(api));
@@ -316,20 +318,6 @@ static void isis_zebra_route_del_route(struct prefix *prefix,
 	}
 
 	zclient_route_send(ZEBRA_ROUTE_DELETE, zclient, &api);
-	UNSET_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ZEBRA_SYNCED);
-}
-
-void isis_zebra_route_update(struct prefix *prefix,
-			     struct prefix_ipv6 *src_p,
-			     struct isis_route_info *route_info)
-{
-	if (zclient->sock < 0)
-		return;
-
-	if (CHECK_FLAG(route_info->flag, ISIS_ROUTE_FLAG_ACTIVE))
-		isis_zebra_route_add_route(prefix, src_p, route_info);
-	else
-		isis_zebra_route_del_route(prefix, src_p, route_info);
 }
 
 static int isis_zebra_read(ZAPI_CALLBACK_ARGS)

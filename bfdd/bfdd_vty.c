@@ -516,7 +516,7 @@ DEFPY(bfd_show_peers, bfd_show_peers_cmd, "show bfd [vrf <NAME>] peers [json]",
 }
 
 DEFPY(bfd_show_peer, bfd_show_peer_cmd,
-      "show bfd [vrf <NAME$vrfname>] peer <WORD$label|<A.B.C.D|X:X::X:X>$peer [{multihop|local-address <A.B.C.D|X:X::X:X>$local|interface IFNAME$ifname}]> [json]",
+      "show bfd [vrf <NAME$vrf_name>] peer <WORD$label|<A.B.C.D|X:X::X:X>$peer [{multihop|local-address <A.B.C.D|X:X::X:X>$local|interface IFNAME$ifname}]> [json]",
       SHOW_STR
       "Bidirection Forwarding Detection\n"
       VRF_CMD_HELP_STR
@@ -528,7 +528,7 @@ DEFPY(bfd_show_peer, bfd_show_peer_cmd,
 
 	/* Look up the BFD peer. */
 	bs = _find_peer_or_error(vty, argc, argv, label, peer_str, local_str,
-				 ifname, vrfname);
+				 ifname, vrf_name);
 	if (bs == NULL)
 		return CMD_WARNING_CONFIG_FAILED;
 
@@ -543,7 +543,7 @@ DEFPY(bfd_show_peer, bfd_show_peer_cmd,
 }
 
 DEFPY(bfd_show_peer_counters, bfd_show_peer_counters_cmd,
-      "show bfd [vrf <NAME$vrfname>] peer <WORD$label|<A.B.C.D|X:X::X:X>$peer [{multihop|local-address <A.B.C.D|X:X::X:X>$local|interface IFNAME$ifname}]> counters [json]",
+      "show bfd [vrf <NAME$vrf_name>] peer <WORD$label|<A.B.C.D|X:X::X:X>$peer [{multihop|local-address <A.B.C.D|X:X::X:X>$local|interface IFNAME$ifname}]> counters [json]",
       SHOW_STR
       "Bidirection Forwarding Detection\n"
       VRF_CMD_HELP_STR
@@ -564,7 +564,7 @@ DEFPY(bfd_show_peer_counters, bfd_show_peer_counters_cmd,
 
 	/* Look up the BFD peer. */
 	bs = _find_peer_or_error(vty, argc, argv, label, peer_str, local_str,
-				 ifname, vrfname);
+				 ifname, vrf_name);
 	if (bs == NULL)
 		return CMD_WARNING_CONFIG_FAILED;
 
@@ -685,6 +685,9 @@ static int bfd_configure_peer(struct bfd_peer_cfg *bpc, bool mhop,
 			snprintf(ebuf, ebuflen, "vrf name too long");
 			return -1;
 		}
+	} else {
+		bpc->bpc_has_vrfname = true;
+		strlcpy(bpc->bpc_vrfname, VRF_DEFAULT_NAME, sizeof(bpc->bpc_vrfname));
 	}
 
 	return 0;

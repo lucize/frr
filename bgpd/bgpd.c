@@ -2053,7 +2053,7 @@ int peer_activate(struct peer *peer, afi_t afi, safi_t safi)
 	    && !bgp->allocate_mpls_labels[afi][SAFI_UNICAST]) {
 
 		if (BGP_DEBUG(zebra, ZEBRA))
-			zlog_info(
+			zlog_debug(
 				"peer(s) are now active for labeled-unicast, allocate MPLS labels");
 
 		bgp->allocate_mpls_labels[afi][SAFI_UNICAST] = 1;
@@ -2156,7 +2156,7 @@ int peer_deactivate(struct peer *peer, afi_t afi, safi_t safi)
 	    && !bgp_afi_safi_peer_exists(bgp, afi, safi)) {
 
 		if (BGP_DEBUG(zebra, ZEBRA))
-			zlog_info(
+			zlog_debug(
 				"peer(s) are no longer active for labeled-unicast, deallocate MPLS labels");
 
 		bgp->allocate_mpls_labels[afi][SAFI_UNICAST] = 0;
@@ -7931,8 +7931,6 @@ static void bgp_pthreads_init(void)
 	assert(!bgp_pth_io);
 	assert(!bgp_pth_ka);
 
-	frr_pthread_init();
-
 	struct frr_pthread_attr io = {
 		.start = frr_pthread_attr_default.start,
 		.stop = frr_pthread_attr_default.stop,
@@ -7958,7 +7956,6 @@ void bgp_pthreads_run(void)
 void bgp_pthreads_finish(void)
 {
 	frr_pthread_stop_all();
-	frr_pthread_finish();
 }
 
 void bgp_init(unsigned short instance)

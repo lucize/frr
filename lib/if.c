@@ -207,20 +207,17 @@ void if_update_to_new_vrf(struct interface *ifp, vrf_id_t vrf_id)
 	if (yang_module_find("frr-interface")) {
 		struct lyd_node *if_dnode;
 
-		pthread_rwlock_wrlock(&running_config->lock);
-		{
-			if_dnode = yang_dnode_get(
-				running_config->dnode,
-				"/frr-interface:lib/interface[name='%s'][vrf='%s']/vrf",
-				ifp->name, old_vrf->name);
-			if (if_dnode) {
-				yang_dnode_change_leaf(if_dnode, vrf->name);
-				running_config->version++;
-			}
+		if_dnode = yang_dnode_get(
+			running_config->dnode,
+			"/frr-interface:lib/interface[name='%s'][vrf='%s']/vrf",
+			ifp->name, old_vrf->name);
+		if (if_dnode) {
+			yang_dnode_change_leaf(if_dnode, vrf->name);
+			running_config->version++;
 		}
-		pthread_rwlock_unlock(&running_config->lock);
 	}
 }
+
 
 /* Delete interface structure. */
 void if_delete_retain(struct interface *ifp)
@@ -1199,7 +1196,7 @@ void if_link_params_free(struct interface *ifp)
  */
 DEFPY_NOSH (interface,
        interface_cmd,
-       "interface IFNAME [vrf NAME$vrfname]",
+       "interface IFNAME [vrf NAME$vrf_name]",
        "Select an interface to configure\n"
        "Interface's name\n"
        VRF_CMD_HELP_STR)
@@ -1209,8 +1206,8 @@ DEFPY_NOSH (interface,
 	struct interface *ifp;
 	int ret;
 
-	if (!vrfname)
-		vrfname = VRF_DEFAULT_NAME;
+	if (!vrf_name)
+		vrf_name = VRF_DEFAULT_NAME;
 
 	/*
 	 * This command requires special handling to maintain backward
@@ -1219,7 +1216,7 @@ DEFPY_NOSH (interface,
 	 * interface is found, then a new one should be created on the default
 	 * VRF.
 	 */
-	VRF_GET_ID(vrf_id, vrfname, false);
+	VRF_GET_ID(vrf_id, vrf_name, false);
 	ifp = if_lookup_by_name_all_vrf(ifname);
 	if (ifp && ifp->vrf_id != vrf_id) {
 		struct vrf *vrf;
@@ -1230,24 +1227,24 @@ DEFPY_NOSH (interface,
 		 */
 		if (vrf_id != VRF_DEFAULT) {
 			vty_out(vty, "%% interface %s not in %s vrf\n", ifname,
-				vrfname);
+				vrf_name);
 			return CMD_WARNING_CONFIG_FAILED;
 		}
 
 		/*
 		 * Special case 2: a VRF name was *not* specified, and the found
 		 * interface is associated to a VRF other than the default one.
-		 * Update vrf_id and vrfname to account for that.
+		 * Update vrf_id and vrf_name to account for that.
 		 */
 		vrf = vrf_lookup_by_id(ifp->vrf_id);
 		assert(vrf);
 		vrf_id = ifp->vrf_id;
-		vrfname = vrf->name;
+		vrf_name = vrf->name;
 	}
 
 	snprintf(xpath_list, sizeof(xpath_list),
 		 "/frr-interface:lib/interface[name='%s'][vrf='%s']", ifname,
-		 vrfname);
+		 vrf_name);
 
 	nb_cli_enqueue_change(vty, ".", NB_OP_CREATE, NULL);
 	ret = nb_cli_apply_changes(vty, xpath_list);
@@ -1270,20 +1267,20 @@ DEFPY_NOSH (interface,
 
 DEFPY (no_interface,
        no_interface_cmd,
-       "no interface IFNAME [vrf NAME$vrfname]",
+       "no interface IFNAME [vrf NAME$vrf_name]",
        NO_STR
        "Delete a pseudo interface's configuration\n"
        "Interface's name\n"
        VRF_CMD_HELP_STR)
 {
-	if (!vrfname)
-		vrfname = VRF_DEFAULT_NAME;
+	if (!vrf_name)
+		vrf_name = VRF_DEFAULT_NAME;
 
 	nb_cli_enqueue_change(vty, ".", NB_OP_DESTROY, NULL);
 
 	return nb_cli_apply_changes(
 		vty, "/frr-interface:lib/interface[name='%s'][vrf='%s']",
-		ifname, vrfname);
+		ifname, vrf_name);
 }
 
 static void cli_show_interface(struct vty *vty, struct lyd_node *dnode,
@@ -1461,6 +1458,60 @@ static int lib_interface_destroy(enum nb_event event,
 }
 
 /*
+ * XPath: /frr-interface:lib/interface
+ */
+static const void *lib_interface_get_next(const void *parent_list_entry,
+					  const void *list_entry)
+{
+	struct vrf *vrf;
+	struct interface *pif = (struct interface *)list_entry;
+
+	if (list_entry == NULL) {
+		vrf = RB_MIN(vrf_name_head, &vrfs_by_name);
+		assert(vrf);
+		pif = RB_MIN(if_name_head, &vrf->ifaces_by_name);
+	} else {
+		vrf = vrf_lookup_by_id(pif->vrf_id);
+		pif = RB_NEXT(if_name_head, pif);
+		/* if no more interfaces, switch to next vrf */
+		while (pif == NULL) {
+			vrf = RB_NEXT(vrf_name_head, vrf);
+			if (!vrf)
+				return NULL;
+			pif = RB_MIN(if_name_head, &vrf->ifaces_by_name);
+		}
+	}
+
+	return pif;
+}
+
+static int lib_interface_get_keys(const void *list_entry,
+				  struct yang_list_keys *keys)
+{
+	const struct interface *ifp = list_entry;
+
+	struct vrf *vrf = vrf_lookup_by_id(ifp->vrf_id);
+
+	assert(vrf);
+
+	keys->num = 2;
+	strlcpy(keys->key[0], ifp->name, sizeof(keys->key[0]));
+	strlcpy(keys->key[1], vrf->name, sizeof(keys->key[1]));
+
+	return NB_OK;
+}
+
+static const void *lib_interface_lookup_entry(const void *parent_list_entry,
+					      const struct yang_list_keys *keys)
+{
+	const char *ifname = keys->key[0];
+	const char *vrfname = keys->key[1];
+	struct vrf *vrf = vrf_lookup_by_name(vrfname);
+
+	return if_lookup_by_name(ifname, vrf->vrf_id);
+}
+
+/*
  * XPath: /frr-interface:lib/interface/description
  */
 static int lib_interface_description_modify(enum nb_event event,
@@ -1505,6 +1556,9 @@ const struct frr_yang_module_info frr_interface_info = {
 				.create = lib_interface_create,
 				.destroy = lib_interface_destroy,
 				.cli_show = cli_show_interface,
+				.get_next = lib_interface_get_next,
+				.get_keys = lib_interface_get_keys,
+				.lookup_entry = lib_interface_lookup_entry,
 			},
 		},
 		{

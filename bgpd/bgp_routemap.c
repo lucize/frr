@@ -1210,10 +1210,26 @@ static void route_match_community_free(void *rule)
 	XFREE(MTYPE_ROUTE_MAP_COMPILED, rcom);
 }
 
+/*
+ * In routemap processing there is a need to add the
+ * name as a rule_key in the dependency table. Routemap
+ * lib is unaware of rule_key when exact-match clause
+ * is in use. routemap lib uses the compiled output to
+ * get the rule_key value.
+ */
+static void *route_match_get_community_key(void *rule)
+{
+	struct rmap_community *rcom;
+
+	rcom = rule;
+	return rcom->name;
+}
+
+
 /* Route map commands for community matching. */
 struct route_map_rule_cmd route_match_community_cmd = {
 	"community", route_match_community, route_match_community_compile,
-	route_match_community_free};
+	route_match_community_free, route_match_get_community_key};
 
 /* Match function for lcommunity match. */
 static enum route_map_cmd_result_t
@@ -1284,7 +1300,8 @@ static void route_match_lcommunity_free(void *rule)
 /* Route map commands for community matching. */
 struct route_map_rule_cmd route_match_lcommunity_cmd = {
 	"large-community", route_match_lcommunity,
-	route_match_lcommunity_compile, route_match_lcommunity_free};
+	route_match_lcommunity_compile, route_match_lcommunity_free,
+	route_match_get_community_key};
 
 
 /* Match function for extcommunity match. */
@@ -1681,6 +1698,30 @@ route_set_weight(void *rule, const struct prefix *prefix,
 /* Set local preference rule structure. */
 struct route_map_rule_cmd route_set_weight_cmd = {
 	"weight", route_set_weight, route_value_compile, route_value_free,
+};
+
+/* `set distance DISTANCE */
+static enum route_map_cmd_result_t
+route_set_distance(void *rule, const struct prefix *prefix,
+		   route_map_object_t type, void *object)
+{
+	struct bgp_path_info *path = object;
+	struct rmap_value *rv = rule;
+
+	if (type != RMAP_BGP)
+		return RMAP_OKAY;
+
+	path->attr->distance = rv->value;
+
+	return RMAP_OKAY;
+}
+
+/* set distance rule structure */
+struct route_map_rule_cmd route_set_distance_cmd = {
+	"distance",
+	route_set_distance,
+	route_value_compile,
+	route_value_free,
 };
 
 /* `set metric METRIC' */
@@ -2731,10 +2772,8 @@ route_set_ipv6_nexthop_prefer_global(void *rule, const struct prefix *prefix,
 		path = object;
 		peer = path->peer;
 
-		if ((CHECK_FLAG(peer->rmap_type, PEER_RMAP_TYPE_IN)
-		     || CHECK_FLAG(peer->rmap_type, PEER_RMAP_TYPE_IMPORT))
-		    && peer->su_remote
-		    && sockunion_family(peer->su_remote) == AF_INET6) {
+		if (CHECK_FLAG(peer->rmap_type, PEER_RMAP_TYPE_IN)
+		    || CHECK_FLAG(peer->rmap_type, PEER_RMAP_TYPE_IMPORT)) {
 			/* Set next hop preference to global */
 			path->attr->mp_nexthop_prefer_global = true;
 			SET_FLAG(path->attr->rmap_change_flags,
@@ -2856,12 +2895,15 @@ route_set_ipv6_nexthop_peer(void *rule, const struct prefix *pfx,
 			/* Set next hop value and length in attribute. */
 			if (IN6_IS_ADDR_LINKLOCAL(&peer_address)) {
 				path->attr->mp_nexthop_local = peer_address;
-				if (path->attr->mp_nexthop_len != 32)
-					path->attr->mp_nexthop_len = 32;
+				if (path->attr->mp_nexthop_len
+				    != BGP_ATTR_NHLEN_IPV6_GLOBAL_AND_LL)
+					path->attr->mp_nexthop_len =
+						BGP_ATTR_NHLEN_IPV6_GLOBAL_AND_LL;
 			} else {
 				path->attr->mp_nexthop_global = peer_address;
 				if (path->attr->mp_nexthop_len == 0)
-					path->attr->mp_nexthop_len = 16;
+					path->attr->mp_nexthop_len =
+						BGP_ATTR_NHLEN_IPV6_GLOBAL;
 			}
 
 		} else if (CHECK_FLAG(peer->rmap_type, PEER_RMAP_TYPE_OUT)) {
@@ -2926,7 +2968,7 @@ route_set_vpnv4_nexthop(void *rule, const struct prefix *prefix,
 
 		/* Set next hop value. */
 		path->attr->mp_nexthop_global_in = *address;
-		path->attr->mp_nexthop_len = 4;
+		path->attr->mp_nexthop_len = BGP_ATTR_NHLEN_IPV4;
 	}
 
 	return RMAP_OKAY;
@@ -3073,11 +3115,6 @@ static int bgp_route_match_add(struct vty *vty, const char *command,
 		retval = CMD_WARNING_CONFIG_FAILED;
 		break;
 	case RMAP_COMPILE_SUCCESS:
-		if (type != RMAP_EVENT_MATCH_ADDED) {
-			route_map_upd8_dependency(type, arg, index->map->name);
-		}
-		break;
-	case RMAP_DUPLICATE_RULE:
 		/*
 		 * Intentionally doing nothing here.
 		 */
@@ -3111,7 +3148,7 @@ static int bgp_route_match_delete(struct vty *vty, const char *command,
 		rmap_name = XSTRDUP(MTYPE_ROUTE_MAP_NAME, index->map->name);
 	}
 
-	ret = route_map_delete_match(index, command, dep_name);
+	ret = route_map_delete_match(index, command, dep_name, type);
 	switch (ret) {
 	case RMAP_RULE_MISSING:
 		vty_out(vty, "%% BGP Can't find rule.\n");
@@ -3122,10 +3159,6 @@ static int bgp_route_match_delete(struct vty *vty, const char *command,
 		retval = CMD_WARNING_CONFIG_FAILED;
 		break;
 	case RMAP_COMPILE_SUCCESS:
-		if (type != RMAP_EVENT_MATCH_DELETED && dep_name)
-			route_map_upd8_dependency(type, dep_name, rmap_name);
-		break;
-	case RMAP_DUPLICATE_RULE:
 		/*
 		 * Nothing to do here
 		 */
@@ -4061,6 +4094,29 @@ DEFUN (set_ip_nexthop_unchanged,
 		    "unchanged");
 }
 
+DEFUN (set_distance,
+       set_distance_cmd,
+       "set distance (0-255)",
+       SET_STR
+       "BGP Administrative Distance to use\n"
+       "Distance value\n")
+{
+	int idx_number = 2;
+
+	return generic_set_add(vty, VTY_GET_CONTEXT(route_map_index),
+			       "distance", argv[idx_number]->arg);
+}
+
+DEFUN (no_set_distance,
+       no_set_distance_cmd,
+       "no set distance [(0-255)]",
+       NO_STR SET_STR
+       "BGP Administrative Distance to use\n"
+       "Distance value\n")
+{
+	return generic_set_delete(vty, VTY_GET_CONTEXT(route_map_index),
+				  "distance", NULL);
+}
 
 DEFUN (set_local_pref,
        set_local_pref_cmd,
@@ -5116,6 +5172,7 @@ void bgp_route_map_init(void)
 	route_map_install_set(&route_set_weight_cmd);
 	route_map_install_set(&route_set_label_index_cmd);
 	route_map_install_set(&route_set_metric_cmd);
+	route_map_install_set(&route_set_distance_cmd);
 	route_map_install_set(&route_set_aspath_prepend_cmd);
 	route_map_install_set(&route_set_aspath_exclude_cmd);
 	route_map_install_set(&route_set_origin_cmd);
@@ -5169,6 +5226,8 @@ void bgp_route_map_init(void)
 	install_element(RMAP_NODE, &set_ip_nexthop_peer_cmd);
 	install_element(RMAP_NODE, &set_ip_nexthop_unchanged_cmd);
 	install_element(RMAP_NODE, &set_local_pref_cmd);
+	install_element(RMAP_NODE, &set_distance_cmd);
+	install_element(RMAP_NODE, &no_set_distance_cmd);
 	install_element(RMAP_NODE, &no_set_local_pref_cmd);
 	install_element(RMAP_NODE, &set_weight_cmd);
 	install_element(RMAP_NODE, &set_label_index_cmd);
