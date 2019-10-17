@@ -1785,9 +1785,9 @@ int subgroup_announce_check(struct bgp_node *rn, struct bgp_path_info *pi,
 
 	/* Route map & unsuppress-map apply. */
 	if (ROUTE_MAP_OUT_NAME(filter) || (pi->extra && pi->extra->suppress)) {
-		struct bgp_path_info rmap_path;
-		struct bgp_path_info_extra dummy_rmap_path_extra;
-		struct attr dummy_attr;
+		struct bgp_path_info rmap_path = {0};
+		struct bgp_path_info_extra dummy_rmap_path_extra = {0};
+		struct attr dummy_attr = {0};
 
 		memset(&rmap_path, 0, sizeof(struct bgp_path_info));
 		rmap_path.peer = peer;
@@ -2748,8 +2748,8 @@ int bgp_maximum_prefix_overflow(struct peer *peer, afi_t afi, safi_t safi,
 			return 0;
 
 		zlog_info(
-			"%%MAXPFXEXCEED: No. of %s prefix received from %s %ld exceed, "
-			"limit %ld",
+			"%%MAXPFXEXCEED: No. of %s prefix received from %s %" PRIu32
+			" exceed, limit %" PRIu32,
 			get_afi_safi_str(afi, safi, false), peer->host,
 			peer->pcount[afi][safi], peer->pmax[afi][safi]);
 		SET_FLAG(peer->af_sflags[afi][safi], PEER_STATUS_PREFIX_LIMIT);
@@ -2810,7 +2810,8 @@ int bgp_maximum_prefix_overflow(struct peer *peer, afi_t afi, safi_t safi,
 			return 0;
 
 		zlog_info(
-			"%%MAXPFX: No. of %s prefix received from %s reaches %ld, max %ld",
+			"%%MAXPFX: No. of %s prefix received from %s reaches %" PRIu32
+			", max %" PRIu32,
 			get_afi_safi_str(afi, safi, false), peer->host,
 			peer->pcount[afi][safi], peer->pmax[afi][safi]);
 		SET_FLAG(peer->af_sflags[afi][safi],
@@ -3162,6 +3163,13 @@ int bgp_update(struct peer *peer, struct prefix *p, uint32_t addpath_id,
 		reason = "route-map;";
 		bgp_attr_flush(&new_attr);
 		goto filtered;
+	}
+
+	if (pi && pi->attr &&
+	    pi->attr->rmap_table_id != new_attr.rmap_table_id) {
+		if (CHECK_FLAG(pi->flags, BGP_PATH_SELECTED))
+			/* remove from RIB previous entry */
+			bgp_zebra_withdraw(p, pi, bgp, safi);
 	}
 
 	if (peer->sort == BGP_PEER_EBGP) {
@@ -3926,11 +3934,15 @@ static void bgp_soft_reconfig_table(struct peer *peer, afi_t afi, safi_t safi,
 			if (ain->peer != peer)
 				continue;
 
-			struct bgp_path_info *pi =
-				bgp_node_get_bgp_path_info(rn);
+			struct bgp_path_info *pi;
 			uint32_t num_labels = 0;
 			mpls_label_t *label_pnt = NULL;
 			struct bgp_route_evpn evpn;
+
+			for (pi = bgp_node_get_bgp_path_info(rn); pi;
+			     pi = pi->next)
+				if (pi->peer == peer)
+					break;
 
 			if (pi && pi->extra)
 				num_labels = pi->extra->num_labels;
@@ -7517,7 +7529,7 @@ void route_vty_out_tmp(struct vty *vty, struct prefix *p, struct attr *attr,
 	json_object *json_status = NULL;
 	json_object *json_net = NULL;
 	char buff[BUFSIZ];
-	char buf2[BUFSIZ];
+
 	/* Route status display. */
 	if (use_json) {
 		json_status = json_object_new_object();
@@ -7530,12 +7542,18 @@ void route_vty_out_tmp(struct vty *vty, struct prefix *p, struct attr *attr,
 
 	/* print prefix and mask */
 	if (use_json) {
-		json_object_string_add(
-			json_net, "addrPrefix",
-			inet_ntop(p->family, &p->u.prefix, buff, BUFSIZ));
-		json_object_int_add(json_net, "prefixLen", p->prefixlen);
-		prefix2str(p, buf2, PREFIX_STRLEN);
-		json_object_string_add(json_net, "network", buf2);
+		if (safi == SAFI_EVPN)
+			bgp_evpn_route2json((struct prefix_evpn *)p, json_net);
+		else if (p->family == AF_INET || p->family == AF_INET6) {
+			json_object_string_add(
+				json_net, "addrPrefix",
+				inet_ntop(p->family, &p->u.prefix, buff,
+				BUFSIZ));
+			json_object_int_add(json_net, "prefixLen",
+				p->prefixlen);
+			prefix2str(p, buff, PREFIX_STRLEN);
+			json_object_string_add(json_net, "network", buff);
+		}
 	} else
 		route_vty_out_route(p, vty, NULL);
 
@@ -7544,10 +7562,8 @@ void route_vty_out_tmp(struct vty *vty, struct prefix *p, struct attr *attr,
 		if (use_json) {
 			if (p->family == AF_INET
 			    && (safi == SAFI_MPLS_VPN || safi == SAFI_ENCAP
-				|| safi == SAFI_EVPN
 				|| !BGP_ATTR_NEXTHOP_AFI_IP6(attr))) {
-				if (safi == SAFI_MPLS_VPN || safi == SAFI_ENCAP
-				    || safi == SAFI_EVPN)
+				if (safi == SAFI_MPLS_VPN || safi == SAFI_ENCAP)
 					json_object_string_add(
 						json_net, "nextHop",
 						inet_ntoa(
@@ -7565,7 +7581,11 @@ void route_vty_out_tmp(struct vty *vty, struct prefix *p, struct attr *attr,
 					inet_ntop(AF_INET6,
 						  &attr->mp_nexthop_global, buf,
 						  BUFSIZ));
-			}
+			} else if (p->family == AF_EVPN &&
+				   !BGP_ATTR_NEXTHOP_AFI_IP6(attr))
+				json_object_string_add(json_net,
+					"nextHop", inet_ntoa(
+					attr->mp_nexthop_global_in));
 
 			if (attr->flag
 			    & ATTR_FLAG_BIT(BGP_ATTR_MULTI_EXIT_DISC))
@@ -7659,10 +7679,9 @@ void route_vty_out_tmp(struct vty *vty, struct prefix *p, struct attr *attr,
 		json_object_boolean_true_add(json_status, ">");
 		json_object_object_add(json_net, "appliedStatusSymbols",
 				       json_status);
-		char buf_cut[BUFSIZ];
 
-		prefix2str(p, buf_cut, PREFIX_STRLEN);
-		json_object_object_add(json_ar, buf_cut, json_net);
+		prefix2str(p, buff, PREFIX_STRLEN);
+		json_object_object_add(json_ar, buff, json_net);
 	} else
 		vty_out(vty, "\n");
 }
@@ -8959,7 +8978,7 @@ void route_vty_out_detail(struct vty *vty, struct bgp *bgp,
 
 		/* Remote Label */
 		if (path->extra && bgp_is_valid_label(&path->extra->label[0])
-		    && safi != SAFI_EVPN) {
+		    && (safi != SAFI_EVPN && !is_route_parent_evpn(path))) {
 			mpls_label_t label = label_pton(&path->extra->label[0]);
 
 			if (json_paths)
@@ -10997,7 +11016,7 @@ static int bgp_peer_counts(struct vty *vty, struct peer *peer, afi_t afi,
 				get_afi_safi_str(afi, safi, false));
 		}
 
-		vty_out(vty, "PfxCt: %ld\n", peer->pcount[afi][safi]);
+		vty_out(vty, "PfxCt: %" PRIu32 "\n", peer->pcount[afi][safi]);
 		vty_out(vty, "\nCounts from RIB table walk:\n\n");
 
 		for (i = 0; i < PCOUNT_MAX; i++)

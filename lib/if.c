@@ -58,6 +58,13 @@ DEFINE_QOBJ_TYPE(interface)
 DEFINE_HOOK(if_add, (struct interface * ifp), (ifp))
 DEFINE_KOOH(if_del, (struct interface * ifp), (ifp))
 
+struct interface_master{
+	int (*create_hook)(struct interface *ifp);
+	int (*up_hook)(struct interface *ifp);
+	int (*down_hook)(struct interface *ifp);
+	int (*destroy_hook)(struct interface *ifp);
+} ifp_master = { 0, };
+
 /* Compare interface names, returning an integer greater than, equal to, or
  * less than 0, (following the strcmp convention), according to the
  * relationship between ifp1 and ifp2.  Interface names consist of an
@@ -134,25 +141,16 @@ static int if_cmp_index_func(const struct interface *ifp1,
 }
 
 /* Create new interface structure. */
-static struct interface *if_create_backend(const char *name, ifindex_t ifindex,
-					   vrf_id_t vrf_id)
+static struct interface *if_new(vrf_id_t vrf_id)
 {
-	struct vrf *vrf = vrf_get(vrf_id, NULL);
 	struct interface *ifp;
 
 	ifp = XCALLOC(MTYPE_IF, sizeof(struct interface));
+
+	ifp->ifindex = IFINDEX_INTERNAL;
+	ifp->name[0] = '\0';
+
 	ifp->vrf_id = vrf_id;
-
-	if (name) {
-		strlcpy(ifp->name, name, sizeof(ifp->name));
-		IFNAME_RB_INSERT(vrf, ifp);
-	} else
-		ifp->name[0] = '\0';
-
-	if (ifindex != IFINDEX_INTERNAL)
-		if_set_index(ifp, ifindex);
-	else
-		ifp->ifindex = ifindex; /* doesn't add it to the list */
 
 	ifp->connected = list_new();
 	ifp->connected->del = (void (*)(void *))connected_free;
@@ -164,18 +162,59 @@ static struct interface *if_create_backend(const char *name, ifindex_t ifindex,
 	SET_FLAG(ifp->status, ZEBRA_INTERFACE_LINKDETECTION);
 
 	QOBJ_REG(ifp, interface);
+	return ifp;
+}
+
+void if_new_via_zapi(struct interface *ifp)
+{
+	if (ifp_master.create_hook)
+		(*ifp_master.create_hook)(ifp);
+}
+
+void if_destroy_via_zapi(struct interface *ifp)
+{
+	if (ifp_master.destroy_hook)
+		(*ifp_master.destroy_hook)(ifp);
+
+	if_set_index(ifp, IFINDEX_INTERNAL);
+	if (!ifp->configured)
+		if_delete(ifp);
+}
+
+void if_up_via_zapi(struct interface *ifp)
+{
+	if (ifp_master.up_hook)
+		(*ifp_master.up_hook)(ifp);
+}
+
+void if_down_via_zapi(struct interface *ifp)
+{
+	if (ifp_master.down_hook)
+		(*ifp_master.down_hook)(ifp);
+}
+
+struct interface *if_create_name(const char *name, vrf_id_t vrf_id)
+{
+	struct interface *ifp;
+
+	ifp = if_new(vrf_id);
+
+	if_set_name(ifp, name);
+
 	hook_call(if_add, ifp);
 	return ifp;
 }
 
-struct interface *if_create(const char *name, vrf_id_t vrf_id)
-{
-	return if_create_backend(name, IFINDEX_INTERNAL, vrf_id);
-}
-
 struct interface *if_create_ifindex(ifindex_t ifindex, vrf_id_t vrf_id)
 {
-	return if_create_backend(NULL, ifindex, vrf_id);
+	struct interface *ifp;
+
+	ifp = if_new(vrf_id);
+
+	if_set_index(ifp, ifindex);
+
+	hook_call(if_add, ifp);
+	return ifp;
 }
 
 /* Create new interface structure. */
@@ -186,7 +225,9 @@ void if_update_to_new_vrf(struct interface *ifp, vrf_id_t vrf_id)
 	/* remove interface from old master vrf list */
 	old_vrf = vrf_lookup_by_id(ifp->vrf_id);
 	if (old_vrf) {
-		IFNAME_RB_REMOVE(old_vrf, ifp);
+		if (ifp->name[0] != '\0')
+			IFNAME_RB_REMOVE(old_vrf, ifp);
+
 		if (ifp->ifindex != IFINDEX_INTERNAL)
 			IFINDEX_RB_REMOVE(old_vrf, ifp);
 	}
@@ -194,7 +235,9 @@ void if_update_to_new_vrf(struct interface *ifp, vrf_id_t vrf_id)
 	ifp->vrf_id = vrf_id;
 	vrf = vrf_get(ifp->vrf_id, NULL);
 
-	IFNAME_RB_INSERT(vrf, ifp);
+	if (ifp->name[0] != '\0')
+		IFNAME_RB_INSERT(vrf, ifp);
+
 	if (ifp->ifindex != IFINDEX_INTERNAL)
 		IFINDEX_RB_INSERT(vrf, ifp);
 
@@ -477,7 +520,7 @@ struct interface *if_get_by_name(const char *name, vrf_id_t vrf_id)
 		ifp = if_lookup_by_name(name, vrf_id);
 		if (ifp)
 			return ifp;
-		return if_create(name, vrf_id);
+		return if_create_name(name, vrf_id);
 	case VRF_BACKEND_VRF_LITE:
 		ifp = if_lookup_by_name_all_vrf(name);
 		if (ifp) {
@@ -489,7 +532,7 @@ struct interface *if_get_by_name(const char *name, vrf_id_t vrf_id)
 			if_update_to_new_vrf(ifp, vrf_id);
 			return ifp;
 		}
-		return if_create(name, vrf_id);
+		return if_create_name(name, vrf_id);
 	}
 
 	return NULL;
@@ -527,19 +570,38 @@ void if_set_index(struct interface *ifp, ifindex_t ifindex)
 {
 	struct vrf *vrf;
 
-	vrf = vrf_lookup_by_id(ifp->vrf_id);
+	vrf = vrf_get(ifp->vrf_id, NULL);
 	assert(vrf);
 
 	if (ifp->ifindex == ifindex)
 		return;
 
 	if (ifp->ifindex != IFINDEX_INTERNAL)
-		IFINDEX_RB_REMOVE(vrf, ifp)
+		IFINDEX_RB_REMOVE(vrf, ifp);
 
 	ifp->ifindex = ifindex;
 
 	if (ifp->ifindex != IFINDEX_INTERNAL)
 		IFINDEX_RB_INSERT(vrf, ifp)
+}
+
+void if_set_name(struct interface *ifp, const char *name)
+{
+	struct vrf *vrf;
+
+	vrf = vrf_get(ifp->vrf_id, NULL);
+	assert(vrf);
+
+	if (if_cmp_name_func(ifp->name, name) == 0)
+		return;
+
+	if (ifp->name[0] != '\0')
+		IFNAME_RB_REMOVE(vrf, ifp);
+
+	strlcpy(ifp->name, name, sizeof(ifp->name));
+
+	if (ifp->name[0] != '\0')
+		IFNAME_RB_INSERT(vrf, ifp);
 }
 
 /* Does interface up ? */
@@ -1367,6 +1429,17 @@ void if_cmd_init(void)
 	install_element(INTERFACE_NODE, &no_interface_desc_cmd);
 }
 
+void if_zapi_callbacks(int (*create)(struct interface *ifp),
+		       int (*up)(struct interface *ifp),
+		       int (*down)(struct interface *ifp),
+		       int (*destroy)(struct interface *ifp))
+{
+	ifp_master.create_hook = create;
+	ifp_master.up_hook = up;
+	ifp_master.down_hook = down;
+	ifp_master.destroy_hook = destroy;
+}
+
 /* ------- Northbound callbacks ------- */
 
 /*
@@ -1423,6 +1496,8 @@ static int lib_interface_create(enum nb_event event,
 #else
 		ifp = if_get_by_name(ifname, vrf->vrf_id);
 #endif /* SUNOS_5 */
+
+		ifp->configured = true;
 		nb_running_set_entry(dnode, ifp);
 		break;
 	}
@@ -1450,6 +1525,8 @@ static int lib_interface_destroy(enum nb_event event,
 		break;
 	case NB_EV_APPLY:
 		ifp = nb_running_unset_entry(dnode);
+
+		ifp->configured = false;
 		if_delete(ifp);
 		break;
 	}

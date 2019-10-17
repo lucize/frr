@@ -35,11 +35,7 @@ import ConfigParser
 import traceback
 import socket
 import ipaddr
-import re
 
-from lib import topotest
-
-from functools import partial
 from lib.topolog import logger, logger_config
 from lib.topogen import TopoRouter
 from lib.topotest import interface_set_status
@@ -48,7 +44,7 @@ from lib.topotest import interface_set_status
 FRRCFG_FILE = "frr_json.conf"
 FRRCFG_BKUP_FILE = "frr_json_initial.conf"
 
-ERROR_LIST = ["Malformed", "Failure", "Unknown"]
+ERROR_LIST = ["Malformed", "Failure", "Unknown", "Incomplete"]
 ROUTER_LIST = []
 
 ####
@@ -621,7 +617,7 @@ def write_test_header(tc_name):
     """ Display message at beginning of test case"""
     count = 20
     logger.info("*"*(len(tc_name)+count))
-    logger.info("START -> Testcase : %s" % tc_name)
+    step("START -> Testcase : %s" % tc_name, reset=True)
     logger.info("*"*(len(tc_name)+count))
 
 
@@ -713,9 +709,9 @@ def retry(attempts=3, wait=2, return_is_str=True, initial_wait=0):
                     kwargs.pop('expected')
                     ret = func(*args, **kwargs)
                     logger.debug("Function returned %s" % ret)
-                    if return_is_str and isinstance(ret, bool):
+                    if return_is_str and isinstance(ret, bool) and _expected:
                         return ret
-                    elif return_is_str and _expected is False:
+                    if isinstance(ret, str) and _expected is False:
                         return ret
 
                     if _attempts == i:
@@ -736,60 +732,29 @@ def retry(attempts=3, wait=2, return_is_str=True, initial_wait=0):
     return _retry
 
 
-def disable_v6_link_local(tgen, router, intf_name=None):
+class Stepper:
     """
-    Disables ipv6 link local addresses for a particular interface or
-    all interfaces
-
-    * `tgen`: tgen onject
-    * `router` : router for which hightest interface should be
-                 calculated
-    * `intf_name` : Interface name for which v6 link local needs to
-                    be disabled
+    Prints step number for the test case step being executed
     """
+    count = 1
 
-    router_list = tgen.routers()
-    for rname, rnode in router_list.iteritems():
-        if rname != router:
-            continue
+    def __call__(self, msg, reset):
+        if reset:
+            Stepper.count = 1
+            logger.info(msg)
+        else:
+            logger.info("STEP %s: '%s'", Stepper.count, msg)
+            Stepper.count += 1
 
-        linklocal = []
 
-        ifaces = router_list[router].run('ip -6 address')
-
-        # Fix newlines (make them all the same)
-        ifaces = ('\n'.join(ifaces.splitlines()) + '\n').splitlines()
-
-        interface = None
-        ll_per_if_count = 0
-        for line in ifaces:
-            # Interface name
-            m = re.search('[0-9]+: ([^:]+)[@if0-9:]+ <', line)
-            if m:
-                interface = m.group(1).split("@")[0]
-                ll_per_if_count = 0
-
-            # Interface ip
-            m = re.search('inet6 (fe80::[0-9a-f]+:[0-9a-f]+:[0-9a-f]+'
-                          ':[0-9a-f]+[/0-9]*) scope link', line)
-            if m:
-                local = m.group(1)
-                ll_per_if_count += 1
-                if ll_per_if_count > 1:
-                    linklocal += [["%s-%s" % (interface, ll_per_if_count), local]]
-                else:
-                    linklocal += [[interface, local]]
-
-        if len(linklocal[0]) > 1:
-            link_local_dict = {item[0]: item[1] for item in linklocal}
-
-            for lname, laddr in link_local_dict.items():
-
-                if intf_name is not None and lname != intf_name:
-                    continue
-
-                cmd = "ip addr del {} dev {}".format(laddr, lname)
-                router_list[router].run(cmd)
+def step(msg, reset=False):
+    """
+    Call Stepper to print test steps. Need to reset at the beginning of test.
+    * ` msg` : Step message body.
+    * `reset` : Reset step count to 1 when set to True.
+    """
+    _step = Stepper()
+    _step(msg, reset)
 
 
 #############################################
@@ -821,8 +786,6 @@ def create_interfaces_cfg(tgen, topo, build=False):
                     interface_name = destRouterLink
                 else:
                     interface_name = data["interface"]
-                    if "ipv6" in data:
-                        disable_v6_link_local(tgen, c_router, interface_name)
                 interface_data.append("interface {}".format(
                     str(interface_name)
                 ))
@@ -1302,13 +1265,15 @@ def create_route_maps(tgen, input_dict, build=False):
 
                         # Weight
                         if weight:
-                            rmap_data.append("set weight {} \n".format(
+                            rmap_data.append("set weight {}".format(
                                 weight))
                         if ipv6_data:
-                            nexthop = ipv6_data.setdefault("nexthop",None)
+                            nexthop = ipv6_data.setdefault("nexthop", None)
                             if nexthop:
-                                rmap_data.append("set ipv6 next-hop \
-                                        {}".format(nexthop))
+                                rmap_data.append("set ipv6 next-hop {}".format(
+                                    nexthop
+                                ))
+
                     # Adding MATCH and SET sequence to RMAP if defined
                     if "match" in rmap_dict:
                         match_data = rmap_dict["match"]
@@ -1569,19 +1534,13 @@ def shutdown_bringup_interface(tgen, dut, intf_name, ifaceaction=False):
     errormsg(str) or True
     """
 
-    from topotest import interface_set_status
     router_list = tgen.routers()
     if ifaceaction:
         logger.info("Bringing up interface : {}".format(intf_name))
     else:
         logger.info("Shutting down interface : {}".format(intf_name))
 
-    interface_set_status(router_list[dut], intf_name,
-                                  ifaceaction)
-
-    if ifaceaction:
-        # Disabling v6 link local once interfac comes up back
-        disable_v6_link_local(tgen, dut, intf_name=intf_name)
+    interface_set_status(router_list[dut], intf_name, ifaceaction)
 
 
 #############################################
@@ -2015,3 +1974,61 @@ def verify_bgp_community(tgen, addr_type, router, network, input_dict=None):
 
     logger.debug("Exiting lib API: verify_bgp_community()")
     return True
+
+
+def verify_create_community_list(tgen, input_dict):
+    """
+    API is to verify if large community list is created for any given DUT in
+    input_dict by running "sh bgp large-community-list {"comm_name"} detail"
+    command.
+    Parameters
+    ----------
+    * `tgen`: topogen object
+    * `input_dict`: having details like - for which router, large community
+                    needs to be verified
+    Usage
+    -----
+    input_dict = {
+        "r1": {
+            "large-community-list": {
+                "standard": {
+                     "Test1": [{"action": "PERMIT", "attribute":\
+                                    ""}]
+                }}}}
+    result = verify_create_community_list(tgen, input_dict)
+    Returns
+    -------
+    errormsg(str) or True
+    """
+
+    logger.debug("Entering lib API: verify_create_community_list()")
+
+    for router in input_dict.keys():
+        if router not in tgen.routers():
+            continue
+
+        rnode = tgen.routers()[router]
+
+        logger.info("Verifying large-community is created for dut %s:",
+                    router)
+
+        for comm_data in input_dict[router]["bgp_community_lists"]:
+            comm_name = comm_data["name"]
+            comm_type = comm_data["community_type"]
+            show_bgp_community = \
+                run_frr_cmd(rnode,
+                            "show bgp large-community-list {} detail".
+                            format(comm_name))
+
+            # Verify community list and type
+            if comm_name in show_bgp_community and comm_type in \
+                    show_bgp_community:
+                logger.info("BGP %s large-community-list %s is"
+                            " created", comm_type, comm_name)
+            else:
+                errormsg = "BGP {} large-community-list {} is not" \
+                           " created".format(comm_type, comm_name)
+                return errormsg
+
+            logger.debug("Exiting lib API: verify_create_community_list()")
+            return True

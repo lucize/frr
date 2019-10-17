@@ -606,7 +606,6 @@ static int netlink_interface(struct nlmsghdr *h, ns_id_t ns_id, int startup)
 	ifindex_t link_ifindex = IFINDEX_INTERNAL;
 	ifindex_t bond_ifindex = IFINDEX_INTERNAL;
 	struct zebra_if *zif;
-	struct vrf *vrf = NULL;
 
 	zns = zebra_ns_lookup(ns_id);
 	ifi = NLMSG_DATA(h);
@@ -690,7 +689,6 @@ static int netlink_interface(struct nlmsghdr *h, ns_id_t ns_id, int startup)
 	if (tb[IFLA_LINK])
 		link_ifindex = *(ifindex_t *)RTA_DATA(tb[IFLA_LINK]);
 
-	vrf = vrf_get(vrf_id, NULL);
 	/* Add interface.
 	 * We add by index first because in some cases such as the master
 	 * interface, we have the index before we have the name. Fixing
@@ -699,8 +697,9 @@ static int netlink_interface(struct nlmsghdr *h, ns_id_t ns_id, int startup)
 	 */
 	ifp = if_get_by_ifindex(ifi->ifi_index, vrf_id);
 	set_ifindex(ifp, ifi->ifi_index, zns); /* add it to ns struct */
-	strlcpy(ifp->name, name, sizeof(ifp->name));
-	IFNAME_RB_INSERT(vrf, ifp);
+
+	if_set_name(ifp, name);
+
 	ifp->flags = ifi->ifi_flags & 0x0000fffff;
 	ifp->mtu6 = ifp->mtu = *(uint32_t *)RTA_DATA(tb[IFLA_MTU]);
 	ifp->metric = 0;
@@ -1385,6 +1384,13 @@ int netlink_link_change(struct nlmsghdr *h, ns_id_t ns_id, int startup)
 			else if (IS_ZEBRA_IF_BOND_SLAVE(ifp) || was_bond_slave)
 				zebra_l2if_update_bond_slave(ifp, bond_ifindex);
 		}
+
+		zif = ifp->info;
+		if (zif) {
+			XFREE(MTYPE_TMP, zif->desc);
+			if (desc)
+				zif->desc = XSTRDUP(MTYPE_TMP, desc);
+		}
 	} else {
 		/* Delete interface notification from kernel */
 		if (ifp == NULL) {
@@ -1409,13 +1415,6 @@ int netlink_link_change(struct nlmsghdr *h, ns_id_t ns_id, int startup)
 
 		if (!IS_ZEBRA_IF_VRF(ifp))
 			if_delete_update(ifp);
-	}
-
-	zif = ifp->info;
-	if (zif) {
-		XFREE(MTYPE_TMP, zif->desc);
-		if (desc)
-			zif->desc = XSTRDUP(MTYPE_TMP, desc);
 	}
 
 	return 0;
